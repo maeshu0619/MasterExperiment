@@ -1,0 +1,739 @@
+MasterEx2025/
+├── .git
+│   ├── COMMIT_EDITMSG
+│   ├── HEAD
+│   ├── branches
+│   ├── config
+│   ├── description
+│   ├── hooks
+│   │   ├── applypatch-msg.sample
+│   │   ├── commit-msg.sample
+│   │   ├── fsmonitor-watchman.sample
+│   │   ├── post-update.sample
+│   │   ├── pre-applypatch.sample
+│   │   ├── pre-commit.sample
+│   │   ├── pre-merge-commit.sample
+│   │   ├── pre-push.sample
+│   │   ├── pre-rebase.sample
+│   │   ├── pre-receive.sample
+│   │   └── ...（2項目省略）
+│   ├── index
+│   ├── info
+│   │   └── exclude
+│   ├── logs
+│   │   ├── HEAD
+│   │   └── refs
+│   │       ├── heads
+│   │       │   └── main
+│   │       └── remotes
+│   │           └── origin
+│   │               └── main
+│   ├── objects
+│   │   ├── 00
+│   │   │   ├── 3fc03ad2ed7052410b36d0588d103e41743f16
+│   │   │   └── cc06113cfdcdabedce470075e186ad8a39feff
+│   │   ├── 01
+│   │   │   ├── 646449caedc958effc3b450360aefd260671ab
+│   │   │   ├── 853ed2639d13990b31ffe98bd292a6cd254beb
+│   │   │   ├── b0e0232af0d76ca8b40119e7f71780fbde8ce2
+│   │   │   └── b61365b11fb8404aba197fdf507877d53e8e52
+│   │   ├── 02
+│   │   │   ├── 2ca74d85950ab56af68ec0cf0ef7293328efff
+│   │   │   ├── 328051532b9a7760d6a2ff90523a07a8ecefed
+│   │   │   ├── 60bd028b729895a84f3f8b81c59cd0ab5d63b7
+│   │   │   ├── 807ded8d9768ffd027cd39aae6301112f17da6
+│   │   │   ├── b780b6faffe7b9520db0bac5da925607321362
+│   │   │   ├── e7c7a117e5889a89306481bc24230465658473
+│   │   │   └── f5e09d5b6b80ad37106f6a0db5d8e56d2064c4
+│   │   ├── 03
+│   │   │   ├── 1e94b786db7668c517bffcf5fb57facef97325
+│   │   │   ├── 78ed8566f3e2b869fabc4f8c002963a3085d46
+│   │   │   ├── 875b36460bfe3d3627c978b1e4827429d9b7de
+│   │   │   ├── ca9dd4a8b92d859cd1abe775225d01794c31e0
+│   │   │   ├── d9c74e58bd09755505062517de1e4964d61eed
+│   │   │   ├── f1bb04fea63fac53a6aae7dc24ff414ba8786d
+│   │   │   └── f8e8f4434e90e84c73f8df6e8cc5b44d21a853
+│   │   ├── 04
+│   │   │   ├── 2a8bbf8bc878670aa5ccc7488d4962233853e7
+│   │   │   ├── 34cfb9a39ac3181f0be345b58cdf3f18069082
+│   │   │   ├── 3828cdb28631d404479383066f7d2c72886563
+│   │   │   ├── 97600ec08a556b8259af38ff4dd55fa9941c6b
+│   │   │   ├── e7bc3ebde704c7680d02180290b1ed7251f729
+│   │   │   └── f1087d625f20bf5e104fb8b3158da90aca9940
+│   │   ├── 05
+│   │   │   ├── 08423ffa2690aa6a31d7b3027e5578acf16c17
+│   │   │   ├── 267bb1c480f0f6c2d86da045035e626566958b
+│   │   │   ├── 3b180522331e7a6e0ebdcaa37a1af34594674c
+│   │   │   ├── 4fee7ed1c57758efb2831bd6b8b09781f72cef
+│   │   │   ├── 52fc1aafcdeb9848671e421235a1e182ef2f03
+│   │   │   ├── 6dcad04761ff0c1c7ae40724d6af94d0c69276
+│   │   │   ├── 75809e3f7664946ef568145bede7eb44efba8f
+│   │   │   ├── cbe20bcc7387a4cec883658517d0de01857a6b
+│   │   │   └── ed7c6e2b1844d6ff0c94de80462bd85442dab9
+│   │   ├── 06
+│   │   │   ├── 3c97daf282b76520139777b89eb643a77a6424
+│   │   │   ├── 847c516d828167ec0225e17558d1073fea1194
+│   │   │   └── d7c873793a5198d12587dc77fe70f3e1bf644a
+│   │   ├── 07
+│   │   │   ├── 330f1e1490e3d5a2c43b4940306eebe3da43a1
+│   │   │   ├── 37e9d97c8cbba376e9fc902fee3241563177cd
+│   │   │   └── fab7494a34b9710ee82ae154f2770473067e8e
+│   │   ├── 08
+│   │   │   ├── 82b90e2902e39d0721d518ddedbc5194ab134e
+│   │   │   ├── acdc83dcea9e0b290201ef4ab8bcc9f0e708e3
+│   │   │   └── dacbdc41b79c7cfc5f9d5f16846e9964fc9461
+│   │   ├── 09
+│   │   │   ├── 2fea666f167b0bb5cd183b4ad7309cb954375f
+│   │   │   ├── 380a20f3ad694a28f8d9125c84ef6b7722c49e
+│   │   │   ├── 3bbae29f4eac1d2b3ba4645bd44f1ae566a608
+│   │   │   ├── 4ad2b21bd086852c3a64ec69a2299afa11385e
+│   │   │   ├── 7e2097b1cb223b999ac158debeea4e82d0e454
+│   │   │   ├── aabf745e3144bcc57735cbeea23bafc888e496
+│   │   │   ├── b040a5b82e97bb44056758d5139a762594f3e3
+│   │   │   ├── c0c9f5dd416c59e7b1891ebfa2bd544110b318
+│   │   │   └── f5361763ca6147b1eaf88f3fe4599bed993f74
+│   │   └── ...（248項目省略）
+│   └── ...（2項目省略）
+├── .gitignore
+├── Compress
+│   └── Octree
+│       └── OctAttention
+│           ├── .git
+│           │   ├── HEAD
+│           │   ├── branches
+│           │   ├── config
+│           │   ├── description
+│           │   ├── hooks
+│           │   │   ├── applypatch-msg.sample
+│           │   │   ├── commit-msg.sample
+│           │   │   ├── fsmonitor-watchman.sample
+│           │   │   ├── post-update.sample
+│           │   │   ├── pre-applypatch.sample
+│           │   │   ├── pre-commit.sample
+│           │   │   ├── pre-merge-commit.sample
+│           │   │   ├── pre-push.sample
+│           │   │   ├── pre-rebase.sample
+│           │   │   ├── pre-receive.sample
+│           │   │   └── ...（2項目省略）
+│           │   ├── index
+│           │   ├── info
+│           │   │   └── exclude
+│           │   ├── logs
+│           │   │   ├── HEAD
+│           │   │   └── refs
+│           │   │       ├── heads
+│           │   │       │   └── obj
+│           │   │       └── remotes
+│           │   │           └── origin
+│           │   │               └── HEAD
+│           │   ├── objects
+│           │   │   ├── info
+│           │   │   └── pack
+│           │   │       ├── pack-847bdc57f11583c4ea8dae9d6cfa9b5fe7706626.idx
+│           │   │       └── pack-847bdc57f11583c4ea8dae9d6cfa9b5fe7706626.pack
+│           │   ├── packed-refs
+│           │   └── ...（1項目省略）
+│           ├── Data
+│           │   └── testPly
+│           │       └── 2851.mat
+│           ├── Exp
+│           │   └── Obj
+│           │       ├── data
+│           │       │   └── 2851.bin
+│           │       └── encoderPLY.txt
+│           ├── LICENSE
+│           ├── OctreeCPP
+│           │   ├── Octree_python_lib.so
+│           │   └── Octreewarpper.py
+│           ├── Preparedata
+│           │   └── data.py
+│           ├── file
+│           │   ├── MVUBMEPG8i.png
+│           │   ├── Ply
+│           │   │   └── 2851.ply
+│           │   ├── environment.sh
+│           │   ├── kitti.cfg
+│           │   ├── pc_error
+│           │   ├── redandblack.cfg
+│           │   └── tmc13v14_r
+│           ├── modelsave
+│           │   └── obj
+│           │       └── encoder_epoch_00800093.pth
+│           ├── numpyAc
+│           │   ├── backend
+│           │   │   └── numpyAc_backend.cpp
+│           │   ├── __init__.py
+│           │   └── numpyAc.py
+│           ├── temp
+│           │   └── data
+│           │       ├── pt0pc.ply
+│           │       └── pt0pcRefer.ply
+│           ├── Octree.py
+│           ├── README.md
+│           ├── attentionModel.py
+│           ├── dataPrepare.py
+│           ├── dataset.py
+│           ├── decoder.py
+│           ├── encoder.py
+│           ├── encoderTool.py
+│           ├── networkTool.py
+│           ├── octAttention.py
+│           ├── pt.py
+│           └── testTMC.py
+├── Mshu.2002140619
+├── Mshu.2002140619.pub
+├── RepKPU
+│   ├── .gitignore
+│   ├── LICENSE
+│   ├── cfgs
+│   │   ├── upsampling
+│   │   │   ├── __init__.py
+│   │   │   ├── pu1k_args.py
+│   │   │   ├── pugan_args.py
+│   │   │   └── pugan_paper_args.py
+│   │   └── utils.py
+│   ├── data
+│   │   └── PU-GAN
+│   │       └── test
+│   │           ├── arbitrary_scale
+│   │           │   ├── 11x
+│   │           │   │   └── gt
+│   │           │   │       ├── 11509_Panda_v4.xyz
+│   │           │   │       ├── 13770_Tiger_V1.xyz
+│   │           │   │       ├── Gramme_aligned.xyz
+│   │           │   │       ├── camel.xyz
+│   │           │   │       ├── casting.xyz
+│   │           │   │       ├── chair.xyz
+│   │           │   │       ├── coverrear_Lp.xyz
+│   │           │   │       ├── cow.xyz
+│   │           │   │       ├── duck.xyz
+│   │           │   │       ├── eight.xyz
+│   │           │   │       └── ...（17項目省略）
+│   │           │   ├── 15x
+│   │           │   │   └── gt
+│   │           │   │       ├── 11509_Panda_v4.xyz
+│   │           │   │       ├── 13770_Tiger_V1.xyz
+│   │           │   │       ├── Gramme_aligned.xyz
+│   │           │   │       ├── camel.xyz
+│   │           │   │       ├── casting.xyz
+│   │           │   │       ├── chair.xyz
+│   │           │   │       ├── coverrear_Lp.xyz
+│   │           │   │       ├── cow.xyz
+│   │           │   │       ├── duck.xyz
+│   │           │   │       ├── eight.xyz
+│   │           │   │       └── ...（17項目省略）
+│   │           │   ├── 19x
+│   │           │   │   └── gt
+│   │           │   │       ├── 11509_Panda_v4.xyz
+│   │           │   │       ├── 13770_Tiger_V1.xyz
+│   │           │   │       ├── Gramme_aligned.xyz
+│   │           │   │       ├── camel.xyz
+│   │           │   │       ├── casting.xyz
+│   │           │   │       ├── chair.xyz
+│   │           │   │       ├── coverrear_Lp.xyz
+│   │           │   │       ├── cow.xyz
+│   │           │   │       ├── duck.xyz
+│   │           │   │       ├── eight.xyz
+│   │           │   │       └── ...（17項目省略）
+│   │           │   ├── 5x
+│   │           │   │   └── gt
+│   │           │   │       ├── 11509_Panda_v4.xyz
+│   │           │   │       ├── 13770_Tiger_V1.xyz
+│   │           │   │       ├── Gramme_aligned.xyz
+│   │           │   │       ├── camel.xyz
+│   │           │   │       ├── casting.xyz
+│   │           │   │       ├── chair.xyz
+│   │           │   │       ├── coverrear_Lp.xyz
+│   │           │   │       ├── cow.xyz
+│   │           │   │       ├── duck.xyz
+│   │           │   │       ├── eight.xyz
+│   │           │   │       └── ...（17項目省略）
+│   │           │   ├── 6x
+│   │           │   │   └── gt
+│   │           │   │       ├── 11509_Panda_v4.xyz
+│   │           │   │       ├── 13770_Tiger_V1.xyz
+│   │           │   │       ├── Gramme_aligned.xyz
+│   │           │   │       ├── camel.xyz
+│   │           │   │       ├── casting.xyz
+│   │           │   │       ├── chair.xyz
+│   │           │   │       ├── coverrear_Lp.xyz
+│   │           │   │       ├── cow.xyz
+│   │           │   │       ├── duck.xyz
+│   │           │   │       ├── eight.xyz
+│   │           │   │       └── ...（17項目省略）
+│   │           │   ├── 7x
+│   │           │   │   └── gt
+│   │           │   │       ├── 11509_Panda_v4.xyz
+│   │           │   │       ├── 13770_Tiger_V1.xyz
+│   │           │   │       ├── Gramme_aligned.xyz
+│   │           │   │       ├── camel.xyz
+│   │           │   │       ├── casting.xyz
+│   │           │   │       ├── chair.xyz
+│   │           │   │       ├── coverrear_Lp.xyz
+│   │           │   │       ├── cow.xyz
+│   │           │   │       ├── duck.xyz
+│   │           │   │       ├── eight.xyz
+│   │           │   │       └── ...（17項目省略）
+│   │           │   └── input
+│   │           │       ├── 11509_Panda_v4.xyz
+│   │           │       ├── 13770_Tiger_V1.xyz
+│   │           │       ├── Gramme_aligned.xyz
+│   │           │       ├── camel.xyz
+│   │           │       ├── casting.xyz
+│   │           │       ├── chair.xyz
+│   │           │       ├── coverrear_Lp.xyz
+│   │           │       ├── cow.xyz
+│   │           │       ├── duck.xyz
+│   │           │       ├── eight.xyz
+│   │           │       └── ...（17項目省略）
+│   │           ├── pugan_16x
+│   │           │   ├── gt
+│   │           │   │   ├── 11509_Panda_v4.xyz
+│   │           │   │   ├── 13770_Tiger_V1.xyz
+│   │           │   │   ├── Gramme_aligned.xyz
+│   │           │   │   ├── camel.xyz
+│   │           │   │   ├── casting.xyz
+│   │           │   │   ├── chair.xyz
+│   │           │   │   ├── coverrear_Lp.xyz
+│   │           │   │   ├── cow.xyz
+│   │           │   │   ├── duck.xyz
+│   │           │   │   ├── eight.xyz
+│   │           │   │   └── ...（17項目省略）
+│   │           │   └── input
+│   │           │       ├── 11509_Panda_v4.xyz
+│   │           │       ├── 13770_Tiger_V1.xyz
+│   │           │       ├── Gramme_aligned.xyz
+│   │           │       ├── camel.xyz
+│   │           │       ├── casting.xyz
+│   │           │       ├── chair.xyz
+│   │           │       ├── coverrear_Lp.xyz
+│   │           │       ├── cow.xyz
+│   │           │       ├── duck.xyz
+│   │           │       ├── eight.xyz
+│   │           │       └── ...（17項目省略）
+│   │           ├── pugan_4x
+│   │           │   ├── downsampled
+│   │           │   │   ├── 11509_Panda_v4.xyz
+│   │           │   │   ├── 13770_Tiger_V1.xyz
+│   │           │   │   ├── Gramme_aligned.xyz
+│   │           │   │   ├── camel.xyz
+│   │           │   │   ├── casting.xyz
+│   │           │   │   ├── chair.xyz
+│   │           │   │   ├── coverrear_Lp.xyz
+│   │           │   │   ├── cow.xyz
+│   │           │   │   ├── duck.xyz
+│   │           │   │   ├── eight.xyz
+│   │           │   │   └── ...（17項目省略）
+│   │           │   ├── expanded
+│   │           │   │   ├── 11509_Panda_v4.xyz
+│   │           │   │   ├── 13770_Tiger_V1.xyz
+│   │           │   │   ├── Gramme_aligned.xyz
+│   │           │   │   ├── camel.xyz
+│   │           │   │   ├── casting.xyz
+│   │           │   │   ├── chair.xyz
+│   │           │   │   ├── coverrear_Lp.xyz
+│   │           │   │   ├── cow.xyz
+│   │           │   │   ├── duck.xyz
+│   │           │   │   ├── eight.xyz
+│   │           │   │   └── ...（17項目省略）
+│   │           │   ├── gt
+│   │           │   │   ├── 11509_Panda_v4.xyz
+│   │           │   │   ├── 13770_Tiger_V1.xyz
+│   │           │   │   ├── Gramme_aligned.xyz
+│   │           │   │   ├── camel.xyz
+│   │           │   │   ├── casting.xyz
+│   │           │   │   ├── chair.xyz
+│   │           │   │   ├── coverrear_Lp.xyz
+│   │           │   │   ├── cow.xyz
+│   │           │   │   ├── duck.xyz
+│   │           │   │   ├── eight.xyz
+│   │           │   │   └── ...（17項目省略）
+│   │           │   ├── input
+│   │           │   │   ├── 11509_Panda_v4.xyz
+│   │           │   │   ├── 13770_Tiger_V1.xyz
+│   │           │   │   ├── Gramme_aligned.xyz
+│   │           │   │   ├── camel.xyz
+│   │           │   │   ├── casting.xyz
+│   │           │   │   ├── chair.xyz
+│   │           │   │   ├── coverrear_Lp.xyz
+│   │           │   │   ├── cow.xyz
+│   │           │   │   ├── duck.xyz
+│   │           │   │   ├── eight.xyz
+│   │           │   │   └── ...（17項目省略）
+│   │           │   ├── nonuniform
+│   │           │   │   ├── 11509_Panda_v4.xyz
+│   │           │   │   ├── 13770_Tiger_V1.xyz
+│   │           │   │   ├── Gramme_aligned.xyz
+│   │           │   │   ├── camel.xyz
+│   │           │   │   ├── casting.xyz
+│   │           │   │   ├── chair.xyz
+│   │           │   │   ├── coverrear_Lp.xyz
+│   │           │   │   ├── cow.xyz
+│   │           │   │   ├── duck.xyz
+│   │           │   │   ├── eight.xyz
+│   │           │   │   └── ...（17項目省略）
+│   │           │   ├── nu_same_num
+│   │           │   │   ├── 11509_Panda_v4.xyz
+│   │           │   │   ├── 13770_Tiger_V1.xyz
+│   │           │   │   ├── Gramme_aligned.xyz
+│   │           │   │   ├── camel.xyz
+│   │           │   │   ├── casting.xyz
+│   │           │   │   ├── chair.xyz
+│   │           │   │   ├── coverrear_Lp.xyz
+│   │           │   │   ├── cow.xyz
+│   │           │   │   ├── duck.xyz
+│   │           │   │   ├── eight.xyz
+│   │           │   │   └── ...（17項目省略）
+│   │           │   └── partial_downsampled
+│   │           │       ├── 11509_Panda_v4.xyz
+│   │           │       ├── 13770_Tiger_V1.xyz
+│   │           │       ├── Gramme_aligned.xyz
+│   │           │       ├── camel.xyz
+│   │           │       ├── casting.xyz
+│   │           │       ├── chair.xyz
+│   │           │       ├── coverrear_Lp.xyz
+│   │           │       ├── cow.xyz
+│   │           │       ├── duck.xyz
+│   │           │       ├── eight.xyz
+│   │           │       └── ...（17項目省略）
+│   │           └── surf_recon
+│   │               ├── chair1.xyz
+│   │               └── xxx.obj
+│   ├── dataset
+│   │   ├── dataset.py
+│   │   └── utils.py
+│   ├── models
+│   │   ├── Chamfer3D
+│   │   │   ├── build
+│   │   │   │   ├── bdist.linux-x86_64
+│   │   │   │   ├── lib.linux-x86_64-3.6
+│   │   │   │   │   └── chamfer_3D.cpython-36m-x86_64-linux-gnu.so
+│   │   │   │   ├── lib.linux-x86_64-cpython-38
+│   │   │   │   │   └── chamfer_3D.cpython-38-x86_64-linux-gnu.so
+│   │   │   │   ├── temp.linux-x86_64-3.6
+│   │   │   │   │   ├── chamfer3D.o
+│   │   │   │   │   └── chamfer_cuda.o
+│   │   │   │   └── temp.linux-x86_64-cpython-38
+│   │   │   │       ├── .ninja_deps
+│   │   │   │       ├── .ninja_log
+│   │   │   │       ├── build.ninja
+│   │   │   │       ├── chamfer3D.o
+│   │   │   │       └── chamfer_cuda.o
+│   │   │   ├── chamfer_3D.egg-info
+│   │   │   │   ├── PKG-INFO
+│   │   │   │   ├── SOURCES.txt
+│   │   │   │   ├── dependency_links.txt
+│   │   │   │   └── top_level.txt
+│   │   │   ├── dist
+│   │   │   │   ├── chamfer_3D-0.0.0-py3.6-linux-x86_64.egg
+│   │   │   │   └── chamfer_3D-0.0.0-py3.8-linux-x86_64.egg
+│   │   │   ├── chamfer3D.cu
+│   │   │   ├── chamfer_cuda.cpp
+│   │   │   ├── dist_chamfer_3D.py
+│   │   │   └── setup.py
+│   │   ├── decoder
+│   │   │   ├── __init__.py
+│   │   │   ├── kernel.py
+│   │   │   └── kernel_o.py
+│   │   ├── encoder
+│   │   │   ├── __init__.py
+│   │   │   └── pointtrans.py
+│   │   ├── kernel_points
+│   │   │   ├── dispositions
+│   │   │   │   ├── k_002_center.ply
+│   │   │   │   ├── k_003_center.ply
+│   │   │   │   ├── k_004_center.ply
+│   │   │   │   ├── k_005_center.ply
+│   │   │   │   ├── k_006_center.ply
+│   │   │   │   ├── k_007_center.ply
+│   │   │   │   ├── k_008_center.ply
+│   │   │   │   ├── k_009_center.ply
+│   │   │   │   ├── k_010_center.ply
+│   │   │   │   ├── k_011_center.ply
+│   │   │   │   └── ...（6項目省略）
+│   │   │   ├── kernel_utils.py
+│   │   │   └── plyutils.py
+│   │   ├── pointops
+│   │   │   ├── build
+│   │   │   │   ├── bdist.linux-x86_64
+│   │   │   │   ├── lib.linux-x86_64-3.6
+│   │   │   │   │   └── pointops_cuda.cpython-36m-x86_64-linux-gnu.so
+│   │   │   │   ├── lib.linux-x86_64-cpython-38
+│   │   │   │   │   └── pointops_cuda.cpython-38-x86_64-linux-gnu.so
+│   │   │   │   ├── temp.linux-x86_64-3.6
+│   │   │   │   │   ├── .ninja_deps
+│   │   │   │   │   ├── .ninja_log
+│   │   │   │   │   ├── build.ninja
+│   │   │   │   │   └── src
+│   │   │   │   │       ├── ballquery
+│   │   │   │   │       │   ├── ballquery_cuda.o
+│   │   │   │   │       │   └── ballquery_cuda_kernel.o
+│   │   │   │   │       ├── featuredistribute
+│   │   │   │   │       │   ├── featuredistribute_cuda.o
+│   │   │   │   │       │   └── featuredistribute_cuda_kernel.o
+│   │   │   │   │       ├── grouping
+│   │   │   │   │       │   ├── grouping_cuda.o
+│   │   │   │   │       │   └── grouping_cuda_kernel.o
+│   │   │   │   │       ├── grouping_int
+│   │   │   │   │       │   ├── grouping_int_cuda.o
+│   │   │   │   │       │   └── grouping_int_cuda_kernel.o
+│   │   │   │   │       ├── interpolation
+│   │   │   │   │       │   ├── interpolation_cuda.o
+│   │   │   │   │       │   └── interpolation_cuda_kernel.o
+│   │   │   │   │       ├── knnquery
+│   │   │   │   │       │   ├── knnquery_cuda.o
+│   │   │   │   │       │   └── knnquery_cuda_kernel.o
+│   │   │   │   │       ├── knnquery_heap
+│   │   │   │   │       │   ├── knnquery_heap_cuda.o
+│   │   │   │   │       │   └── knnquery_heap_cuda_kernel.o
+│   │   │   │   │       ├── labelstat
+│   │   │   │   │       │   ├── labelstat_cuda.o
+│   │   │   │   │       │   └── labelstat_cuda_kernel.o
+│   │   │   │   │       ├── pointops_api.o
+│   │   │   │   │       └── sampling
+│   │   │   │   │           ├── sampling_cuda.o
+│   │   │   │   │           └── sampling_cuda_kernel.o
+│   │   │   │   └── temp.linux-x86_64-cpython-38
+│   │   │   │       ├── .ninja_deps
+│   │   │   │       ├── .ninja_log
+│   │   │   │       ├── build.ninja
+│   │   │   │       └── src
+│   │   │   │           ├── ballquery
+│   │   │   │           │   ├── ballquery_cuda.o
+│   │   │   │           │   └── ballquery_cuda_kernel.o
+│   │   │   │           ├── featuredistribute
+│   │   │   │           │   ├── featuredistribute_cuda.o
+│   │   │   │           │   └── featuredistribute_cuda_kernel.o
+│   │   │   │           ├── grouping
+│   │   │   │           │   ├── grouping_cuda.o
+│   │   │   │           │   └── grouping_cuda_kernel.o
+│   │   │   │           ├── grouping_int
+│   │   │   │           │   ├── grouping_int_cuda.o
+│   │   │   │           │   └── grouping_int_cuda_kernel.o
+│   │   │   │           ├── interpolation
+│   │   │   │           │   ├── interpolation_cuda.o
+│   │   │   │           │   └── interpolation_cuda_kernel.o
+│   │   │   │           ├── knnquery
+│   │   │   │           │   ├── knnquery_cuda.o
+│   │   │   │           │   └── knnquery_cuda_kernel.o
+│   │   │   │           ├── knnquery_heap
+│   │   │   │           │   ├── knnquery_heap_cuda.o
+│   │   │   │           │   └── knnquery_heap_cuda_kernel.o
+│   │   │   │           ├── labelstat
+│   │   │   │           │   ├── labelstat_cuda.o
+│   │   │   │           │   └── labelstat_cuda_kernel.o
+│   │   │   │           ├── pointops_api.o
+│   │   │   │           └── sampling
+│   │   │   │               ├── sampling_cuda.o
+│   │   │   │               └── sampling_cuda_kernel.o
+│   │   │   ├── dist
+│   │   │   │   ├── pointops-0.0.0-py3.6-linux-x86_64.egg
+│   │   │   │   └── pointops-0.0.0-py3.8-linux-x86_64.egg
+│   │   │   ├── functions
+│   │   │   │   ├── __init__.py
+│   │   │   │   └── pointops.py
+│   │   │   ├── pointops.egg-info
+│   │   │   │   ├── PKG-INFO
+│   │   │   │   ├── SOURCES.txt
+│   │   │   │   ├── dependency_links.txt
+│   │   │   │   └── top_level.txt
+│   │   │   ├── src
+│   │   │   │   ├── .ninja_deps
+│   │   │   │   ├── .ninja_log
+│   │   │   │   ├── ballquery
+│   │   │   │   │   ├── ballquery_cuda.cpp
+│   │   │   │   │   ├── ballquery_cuda_kernel.cu
+│   │   │   │   │   └── ballquery_cuda_kernel.h
+│   │   │   │   ├── ballquery_cuda_kernel.cuda.o
+│   │   │   │   ├── build.ninja
+│   │   │   │   ├── featuredistribute
+│   │   │   │   │   ├── featuredistribute_cuda.cpp
+│   │   │   │   │   ├── featuredistribute_cuda_kernel.cu
+│   │   │   │   │   └── featuredistribute_cuda_kernel.h
+│   │   │   │   ├── featuredistribute_cuda_kernel.cuda.o
+│   │   │   │   ├── grouping
+│   │   │   │   │   ├── grouping_cuda.cpp
+│   │   │   │   │   ├── grouping_cuda_kernel.cu
+│   │   │   │   │   └── grouping_cuda_kernel.h
+│   │   │   │   ├── grouping_cuda_kernel.cuda.o
+│   │   │   │   ├── grouping_int
+│   │   │   │   │   ├── grouping_int_cuda.cpp
+│   │   │   │   │   ├── grouping_int_cuda_kernel.cu
+│   │   │   │   │   └── grouping_int_cuda_kernel.h
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── cuda_utils.h
+│   │   │   │   ├── pointops_api.cpp
+│   │   │   │   └── ...（12項目省略）
+│   │   │   ├── __init__.py
+│   │   │   └── setup.py
+│   │   ├── README.md
+│   │   ├── repkpu.py
+│   │   └── utils.py
+│   ├── pretrain
+│   │   ├── ckpt-best.pth
+│   │   ├── pugan
+│   │   │   ├── ckpt-best.pth
+│   │   │   └── train_log.txt
+│   │   ├── pugan_best.pth
+│   │   └── train_log.txt
+│   ├── result
+│   │   ├── pugan_10x
+│   │   │   ├── xyz
+│   │   │   │   ├── 11509_Panda_v4.xyz
+│   │   │   │   ├── 13770_Tiger_V1.xyz
+│   │   │   │   ├── Gramme_aligned.xyz
+│   │   │   │   ├── camel.xyz
+│   │   │   │   ├── casting.xyz
+│   │   │   │   ├── chair.xyz
+│   │   │   │   ├── coverrear_Lp.xyz
+│   │   │   │   ├── cow.xyz
+│   │   │   │   ├── duck.xyz
+│   │   │   │   ├── eight.xyz
+│   │   │   │   └── ...（17項目省略）
+│   │   │   └── cd.txt
+│   │   ├── pugan_13x
+│   │   │   ├── xyz
+│   │   │   │   ├── 11509_Panda_v4.xyz
+│   │   │   │   ├── 13770_Tiger_V1.xyz
+│   │   │   │   ├── Gramme_aligned.xyz
+│   │   │   │   ├── camel.xyz
+│   │   │   │   ├── casting.xyz
+│   │   │   │   ├── chair.xyz
+│   │   │   │   ├── coverrear_Lp.xyz
+│   │   │   │   ├── cow.xyz
+│   │   │   │   ├── duck.xyz
+│   │   │   │   ├── eight.xyz
+│   │   │   │   └── ...（17項目省略）
+│   │   │   └── cd.txt
+│   │   ├── pugan_15x
+│   │   │   ├── xyz
+│   │   │   │   ├── 11509_Panda_v4.xyz
+│   │   │   │   ├── 13770_Tiger_V1.xyz
+│   │   │   │   ├── Gramme_aligned.xyz
+│   │   │   │   ├── camel.xyz
+│   │   │   │   ├── casting.xyz
+│   │   │   │   ├── chair.xyz
+│   │   │   │   ├── coverrear_Lp.xyz
+│   │   │   │   ├── cow.xyz
+│   │   │   │   ├── duck.xyz
+│   │   │   │   ├── eight.xyz
+│   │   │   │   └── ...（17項目省略）
+│   │   │   └── cd.txt
+│   │   ├── pugan_17x
+│   │   │   ├── xyz
+│   │   │   │   ├── 11509_Panda_v4.xyz
+│   │   │   │   ├── 13770_Tiger_V1.xyz
+│   │   │   │   ├── Gramme_aligned.xyz
+│   │   │   │   ├── camel.xyz
+│   │   │   │   ├── casting.xyz
+│   │   │   │   ├── chair.xyz
+│   │   │   │   ├── coverrear_Lp.xyz
+│   │   │   │   ├── cow.xyz
+│   │   │   │   ├── duck.xyz
+│   │   │   │   ├── eight.xyz
+│   │   │   │   └── ...（17項目省略）
+│   │   │   └── cd.txt
+│   │   ├── pugan_2x
+│   │   │   ├── xyz
+│   │   │   │   ├── 11509_Panda_v4.xyz
+│   │   │   │   ├── 13770_Tiger_V1.xyz
+│   │   │   │   ├── Gramme_aligned.xyz
+│   │   │   │   ├── camel.xyz
+│   │   │   │   ├── casting.xyz
+│   │   │   │   ├── chair.xyz
+│   │   │   │   ├── coverrear_Lp.xyz
+│   │   │   │   ├── cow.xyz
+│   │   │   │   ├── duck.xyz
+│   │   │   │   ├── eight.xyz
+│   │   │   │   └── ...（17項目省略）
+│   │   │   └── cd.txt
+│   │   ├── pugan_3x
+│   │   │   ├── xyz
+│   │   │   │   ├── 11509_Panda_v4.xyz
+│   │   │   │   ├── 13770_Tiger_V1.xyz
+│   │   │   │   ├── Gramme_aligned.xyz
+│   │   │   │   ├── camel.xyz
+│   │   │   │   ├── casting.xyz
+│   │   │   │   ├── chair.xyz
+│   │   │   │   ├── coverrear_Lp.xyz
+│   │   │   │   ├── cow.xyz
+│   │   │   │   ├── duck.xyz
+│   │   │   │   ├── eight.xyz
+│   │   │   │   └── ...（17項目省略）
+│   │   │   └── cd.txt
+│   │   ├── pugan_4x
+│   │   │   ├── xyz
+│   │   │   │   ├── 11509_Panda_v4.xyz
+│   │   │   │   ├── 13770_Tiger_V1.xyz
+│   │   │   │   ├── Gramme_aligned.xyz
+│   │   │   │   ├── camel.xyz
+│   │   │   │   ├── casting.xyz
+│   │   │   │   ├── chair.xyz
+│   │   │   │   ├── coverrear_Lp.xyz
+│   │   │   │   ├── cow.xyz
+│   │   │   │   ├── duck.xyz
+│   │   │   │   ├── eight.xyz
+│   │   │   │   └── ...（17項目省略）
+│   │   │   └── cd.txt
+│   │   ├── pugan_5x
+│   │   │   ├── xyz
+│   │   │   │   ├── 11509_Panda_v4.xyz
+│   │   │   │   ├── 13770_Tiger_V1.xyz
+│   │   │   │   ├── Gramme_aligned.xyz
+│   │   │   │   ├── camel.xyz
+│   │   │   │   ├── casting.xyz
+│   │   │   │   ├── chair.xyz
+│   │   │   │   ├── coverrear_Lp.xyz
+│   │   │   │   ├── cow.xyz
+│   │   │   │   ├── duck.xyz
+│   │   │   │   ├── eight.xyz
+│   │   │   │   └── ...（17項目省略）
+│   │   │   └── cd.txt
+│   │   ├── pugan_5x_ds
+│   │   │   ├── xyz
+│   │   │   │   ├── 11509_Panda_v4.xyz
+│   │   │   │   ├── 13770_Tiger_V1.xyz
+│   │   │   │   ├── Gramme_aligned.xyz
+│   │   │   │   ├── camel.xyz
+│   │   │   │   ├── casting.xyz
+│   │   │   │   ├── chair.xyz
+│   │   │   │   ├── coverrear_Lp.xyz
+│   │   │   │   ├── cow.xyz
+│   │   │   │   ├── duck.xyz
+│   │   │   │   ├── eight.xyz
+│   │   │   │   └── ...（17項目省略）
+│   │   │   └── cd.txt
+│   │   ├── pugan_5x_expanded
+│   │   │   ├── xyz
+│   │   │   │   ├── 11509_Panda_v4.xyz
+│   │   │   │   ├── 13770_Tiger_V1.xyz
+│   │   │   │   ├── Gramme_aligned.xyz
+│   │   │   │   ├── camel.xyz
+│   │   │   │   ├── casting.xyz
+│   │   │   │   ├── chair.xyz
+│   │   │   │   ├── coverrear_Lp.xyz
+│   │   │   │   ├── cow.xyz
+│   │   │   │   ├── duck.xyz
+│   │   │   │   ├── eight.xyz
+│   │   │   │   └── ...（17項目省略）
+│   │   │   └── cd.txt
+│   │   └── ...（7項目省略）
+│   ├── vis.png
+│   ├── README.md
+│   ├── directory_structure.txt
+│   ├── requirements.txt
+│   ├── surf_recon.py
+│   ├── test.py
+│   └── train.py
+├── directory_structure.txt
+├── out
+│   ├── PartAnnotation
+│   │   └── 02691156
+│   │       ├── 1a04e3eab45ca15dd86060f189eb133.csv
+│   │       ├── 1a04e3eab45ca15dd86060f189eb133.npz
+│   │       └── 1a04e3eab45ca15dd86060f189eb133.ply
+│   ├── voxel.csv
+│   ├── voxel.npz
+│   ├── voxel.ply
+│   └── voxel_boxes.ply
+└── requirements.txt
