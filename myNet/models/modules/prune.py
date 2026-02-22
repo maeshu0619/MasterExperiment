@@ -56,12 +56,19 @@ class PruningModule(nn.Module):
 
         # ---- 削除点数制御 ----
         mean_ratio = keep_prob.mean(dim=1)
-        L_cnt = ((mean_ratio - self.target_ratio) ** 2).mean()
+        # L_cnt = torch.relu(self.target_ratio - mean_ratio).mean()
+        # L_cnt = ((mean_ratio - self.target_ratio) ** 2).mean()
+        L_cnt = (abs(mean_ratio - self.target_ratio)).mean()
 
         # ---- 外れ点抑制 ----
         density = d.squeeze(1)
         d_norm = density / (density.mean(dim=1, keepdim=True) + 1e-6)
         L_out = (keep_prob * d_norm).mean()
+
+        # density = d.squeeze(1)
+        # density = torch.relu(density)
+        # d_norm = density / (density.mean(dim=1, keepdim=True) + 1e-6)
+        # L_out = (keep_prob * d_norm.clamp(min=0)).mean()
 
         prune_loss = 0.0
         if self.cfgs.trainORtest == "train":

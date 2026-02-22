@@ -7,7 +7,7 @@ class AddModule(nn.Module):
     追加領域 + 追加点数 + 追加ベクトルを同時に学習するAdd
     - TopKを使わない（非微分を排除）
     - Binary Concrete で追加マスクを生成
-    - 返り値に add_loss を含める
+    - 返り値に L_add を含める
     """
 
     def __init__(self, cfgs, writer):
@@ -24,10 +24,10 @@ class AddModule(nn.Module):
         # 目標追加率（例: 0.05 なら Nの5%を追加）
         self.target_add_ratio = float(getattr(cfgs, "target_add_ratio", 0.05))
 
-        # 損失重み（既存）
-        self.lambda_cnt = float(getattr(cfgs, "lambda_add_cnt", 1.0))
-        self.lambda_where = float(getattr(cfgs, "lambda_add_where", 1.0))
-        self.lambda_off = float(getattr(cfgs, "lambda_add_off", 1.0))
+        # 損失重み
+        self.add_cnt = cfgs.add_cnt
+        self.add_fit = cfgs.add_fit
+        self.add_rep = cfgs.add_rep
 
         # 追加: RepKPU由来の正則化（fit / rep）
         self.lambda_fit = float(getattr(cfgs, "lambda_add_fit", 100))
@@ -86,8 +86,8 @@ class AddModule(nn.Module):
 
     def _compute_L_fit(self, pts: torch.Tensor, new_pts: torch.Tensor):
         """
-        reg.py の fit_loss と同型の目的（距離→min→二乗→L1）を、
-        (B,K,N) の巨大行列を保持せず chunk で最小距離だけ計算して実現する版。
+        reg.py の fit_loss と同型の目的（最近傍距離→(dist/conv_r)^2→L1）を、
+        (c,N) や (K,N) の巨大行列を作らずに実現する版。
 
         pts    : (B,3,N)
         new_pts: (B,3,K)
@@ -98,39 +98,113 @@ class AddModule(nn.Module):
             return pts.new_tensor(0.0)
 
         _l1 = nn.L1Loss()
-        conv_r = (self.conv_radius + 1e-8)
+        conv_r = float(self.conv_radius) + 1e-8
+        conv_r2 = conv_r * conv_r
 
-        loss_accum = 0.0
+        # chunk サイズ（cfg で調整可能）
+        # q_chunk: クエリ側（追加点）を何点ずつ処理するか
+        # r_chunk: 参照側（元点群）を何点ずつ処理するか
+        q_chunk = int(getattr(self.cfgs, "add_fit_q_chunk", 256))
+        r_chunk = int(getattr(self.cfgs, "add_fit_ref_chunk", 4096))
+
+        loss_accum = pts.new_tensor(0.0)
         count = 0
 
         # (B,N,3)
         p_ref = pts.permute(0, 2, 1).contiguous()
 
-        # chunk サイズ（必要ならcfgで調整可能にしてよい）
-        chunk = int(getattr(self.cfgs, "add_fit_chunk", 1024))
-
         for b in range(B):
-            # (K,3)
+            # q: (K,3), ref: (N,3)
             q = new_pts[b].permute(1, 0).contiguous()
-            ref = p_ref[b]  # (N,3)
+            ref = p_ref[b]
 
-            # 各クエリ点の最近傍距離を chunk で求める
-            mins = []
-            for s in range(0, K, chunk):
-                qe = q[s:s+chunk]  # (c,3)
-                # (c,N) を一時的に作るが c を小さくして爆発を防ぐ
-                d = torch.cdist(qe, ref)                 # (c,N)
-                md, _ = torch.min(d, dim=1)              # (c,)
-                mins.append(md)
-            min_dist = torch.cat(mins, dim=0)            # (K,)
+            # 計算安定性と速度のため、距離計算だけ float32 で行う
+            # （amp を使っていてもここは安全にしたい）
+            q32 = q.float()
+            ref32 = ref.float()
 
-            # reg.py と同様に (dist/conv_radius)^2 を 0 に寄せる（L1）
-            val = (min_dist / conv_r) ** 2               # (K,)
-            loss_b = _l1(val, torch.zeros_like(val))
-            loss_accum = loss_accum + loss_b
-            count += 1
+            # ref の二乗ノルムはブロックごとに計算（全N分を保持しない）
+            for qs in range(0, K, q_chunk):
+                qe = q32[qs:qs + q_chunk]  # (c,3)
+                c = qe.shape[0]
+
+                # クエリ側ノルム (c,1)
+                qn = (qe * qe).sum(dim=1, keepdim=True)
+
+                # 現在の最小二乗距離を保持 (c,)
+                min_sq = torch.full((c,), float("inf"), device=pts.device, dtype=torch.float32)
+
+                # 参照点をブロック分割して min を更新
+                for rs in range(0, N, r_chunk):
+                    rb = ref32[rs:rs + r_chunk]  # (m,3)
+
+                    # 参照側ノルム (1,m)
+                    rn = (rb * rb).sum(dim=1, keepdim=True).t()
+
+                    # dist_sq = qn + rn - 2*qe@rb^T  -> (c,m)
+                    # (c,m) は作るが m を小さくして OOM を回避
+                    dist_sq = qn + rn - 2.0 * (qe @ rb.t())
+                    dist_sq = torch.clamp(dist_sq, min=0.0)
+
+                    # クエリ点ごとに最小更新
+                    blk_min, _ = dist_sq.min(dim=1)  # (c,)
+                    min_sq = torch.minimum(min_sq, blk_min)
+
+                # (dist/conv_r)^2 = min_sq / conv_r^2
+                val = min_sq / conv_r2  # (c,)
+                loss_q = _l1(val, torch.zeros_like(val))
+                loss_accum = loss_accum + loss_q
+                count += 1
 
         return loss_accum / float(count)
+
+    # def _compute_L_fit(self, pts: torch.Tensor, new_pts: torch.Tensor):
+    #     """
+    #     reg.py の fit_loss と同型の目的（距離→min→二乗→L1）を、
+    #     (B,K,N) の巨大行列を保持せず chunk で最小距離だけ計算して実現する版。
+
+    #     pts    : (B,3,N)
+    #     new_pts: (B,3,K)
+    #     """
+    #     B, _, N = pts.shape
+    #     _, _, K = new_pts.shape
+    #     if K <= 0:
+    #         return pts.new_tensor(0.0)
+
+    #     _l1 = nn.L1Loss()
+    #     conv_r = (self.conv_radius + 1e-8)
+
+    #     loss_accum = 0.0
+    #     count = 0
+
+    #     # (B,N,3)
+    #     p_ref = pts.permute(0, 2, 1).contiguous()
+
+    #     # chunk サイズ（必要ならcfgで調整可能にしてよい）
+    #     chunk = int(getattr(self.cfgs, "add_fit_chunk", 1024))
+
+    #     for b in range(B):
+    #         # (K,3)
+    #         q = new_pts[b].permute(1, 0).contiguous()
+    #         ref = p_ref[b]  # (N,3)
+
+    #         # 各クエリ点の最近傍距離を chunk で求める
+    #         mins = []
+    #         for s in range(0, K, chunk):
+    #             qe = q[s:s+chunk]  # (c,3)
+    #             # (c,N) を一時的に作るが c を小さくして爆発を防ぐ
+    #             d = torch.cdist(qe, ref)                 # (c,N)
+    #             md, _ = torch.min(d, dim=1)              # (c,)
+    #             mins.append(md)
+    #         min_dist = torch.cat(mins, dim=0)            # (K,)
+
+    #         # reg.py と同様に (dist/conv_radius)^2 を 0 に寄せる（L1）
+    #         val = (min_dist / conv_r) ** 2               # (K,)
+    #         loss_b = _l1(val, torch.zeros_like(val))
+    #         loss_accum = loss_accum + loss_b
+    #         count += 1
+
+    #     return loss_accum / float(count)
 
     def _compute_L_rep(self, new_pts: torch.Tensor):
         """
@@ -191,7 +265,7 @@ class AddModule(nn.Module):
           new_pts  : (B,3,Kmin)
           add_prob : (B,1,N)
           add_idx  : (B,Kmin)
-          add_loss : scalar
+          L_add : scalar
         """
         B, _, N = pts.shape
 
@@ -211,10 +285,6 @@ class AddModule(nn.Module):
         max_offset = float(getattr(self.cfgs, "max_offset", 1.0))
         offset = dir_vec * (mag.unsqueeze(1) * max_offset)    # (B,3,N)
 
-
-        # ======================================================
-        # 実際に追加（mask>0.5 の点から new_pts を生成）
-        # ======================================================
         new_pts_list = []
         add_idx_list = []
 
@@ -227,8 +297,9 @@ class AddModule(nn.Module):
                 idx = torch.topk(add_prob[b], k=max_add_points, largest=True).indices
 
             # 全ゼロ崩壊対策（最低1点）
-            if idx.numel() == 0:
-                idx = torch.topk(add_prob[b], k=1, largest=True).indices
+            min_add = max(1, int(self.target_add_ratio * N))
+            if idx.numel() < min_add:
+                idx = torch.topk(add_prob[b], k=min_add, largest=True).indices
 
             pts_sel = pts[b, :, idx]                 # (3,K)
             off_sel = offset[b, :, idx]              # (3,K)
@@ -244,44 +315,31 @@ class AddModule(nn.Module):
         L_fit = self._compute_L_fit(pts, new_pts)
         L_rep = self._compute_L_rep(new_pts)
 
-        add_loss = 0.0
+        L_add = 0.0
         if self.cfgs.trainORtest == "train":
-            # ========= add_loss（既存） =========
             mean_add_ratio = add_prob.mean(dim=1)  # (B,)
-            L_cnt = ((mean_add_ratio - self.target_add_ratio) ** 2).mean()
+            # L_cnt = ((mean_add_ratio - self.target_add_ratio) ** 2).mean()
+            
+            delta = (mean_add_ratio - self.target_add_ratio).abs()
+            L_cnt = torch.log1p(128 * delta).mean()
 
-            # ds = density_score.squeeze(1)  # (B,N)
-            # ds_norm = ds / (ds.mean(dim=1, keepdim=True) + 1e-6)
-            # L_where = -(add_prob * ds_norm).mean()
-
-            # off_norm = offset.norm(dim=1)  # (B,N)
-            # L_off = (add_prob * (off_norm / (max_offset + 1e-8))).mean()
-
-            add_loss = (
-                # self.lambda_cnt * L_cnt
+            L_add = (
+                self.add_cnt * L_cnt
                 # + self.lambda_where * L_where
                 # + self.lambda_off * L_off
-                # + self.lambda_fit * L_fit
-                # + self.lambda_rep * L_rep
-                self.lambda_fit * L_fit
-                + self.lambda_rep * L_rep
+                # + self.add_fit * L_fit
+                # + self.add_rep * L_rep
+                + self.add_fit * L_fit
+                + self.add_rep * L_rep
             )
 
             if self.writer is not None and hasattr(self.writer, "write"):
-                self.writer.write(
-                    f"add_loss: {add_loss} -> "
-                    f"L_cnt:{L_cnt}, "
-                    f"L_fit:{L_fit}, L_rep:{L_rep}, "
-                    # f"mean_add_ratio:{mean_add_ratio.mean().item():.4f}, Kmin:{K_min}"
-                )
-                # self.writer.write(
-                #     f"add_loss: {add_loss} -> "
-                #     f"L_fit:{L_fit}, L_rep:{L_rep}, "
-                # )
+                self.writer.write(f"L_add   :{L_add:.4f}->L_cnt:{L_cnt:.4f}, L_fit:{L_fit:.4f}, L_rep:{L_rep:.4f}, AddRatio:{mean_add_ratio.item():.4f}")
+
 
         self.last_add_prob = add_prob
         self.last_add_mask = add_mask
-        self.last_add_loss = add_loss
+        self.last_add_loss = L_add
 
         pts_add = torch.cat([pts, new_pts], dim=2)  # (B,3,N+Kmin)
-        return pts_add, new_pts, add_prob.unsqueeze(1), add_idx, add_loss
+        return pts_add, new_pts, add_prob.unsqueeze(1), add_idx, L_add
