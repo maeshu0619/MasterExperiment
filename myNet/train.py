@@ -225,7 +225,7 @@ def train(model, args, loss, file_date, writer):
                 
                 en_step = time.time()
                 
-                print(f"Epi{episode + 1}/Epo{epoch + 1}/Step{step + 1}:{en_step-st_step}s   |   {datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S')}")
+                print(f"Epi{episode + 1}/Epo{epoch + 1}/Step{step + 1}:{en_step-st_step:.4f}s   |   {datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S')}")
 
             # lr scheduler
             scheduler_steplr.step()

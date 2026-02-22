@@ -1,8 +1,8 @@
 import argparse
 from cfgs.utils import str2bool
 
-pretrained_date = "2026-02-21"
-pretrained_time = "18-44-38"
+pretrained_date = "2026-02-22"
+pretrained_time = "16-00-54"
 method_loss = "cd"
 
 def parse_pugan_args(parser, file_day, file_time, dir_input):
@@ -56,14 +56,14 @@ def parse_pugan_args(parser, file_day, file_time, dir_input):
     parser.add_argument('--com_bit',    default=5*100, type=float, help='alpha of Loss function parameter')
     parser.add_argument('--com_sin',    default=0.5*100, type=float, help='beta of Loss function parameter')
     parser.add_argument('--com_node',   default=0.8*100, type=float, help='gamma of Loss function parameter')
-    parser.add_argument('--prun_cnt',   default=10*100, type=float, help='gamma of Loss function parameter')
-    parser.add_argument('--prun_out',   default=1*100, type=float, help='gamma of Loss function parameter')
+    parser.add_argument('--prun_cnt',   default=3*100, type=float, help='gamma of Loss function parameter')
+    parser.add_argument('--prun_out',   default=7*100, type=float, help='gamma of Loss function parameter')
     parser.add_argument('--add_cnt',    default=3*100, type=float, help='gamma of Loss function parameter')
     parser.add_argument('--add_fit',    default=1*100, type=float, help='gamma of Loss function parameter')
     parser.add_argument('--add_rep',    default=1*100, type=float, help='gamma of Loss function parameter')
-    parser.add_argument('--w_geom',     default=3, type=float, help='seigma of Loss function parameter')
-    parser.add_argument('--w_com',      default=10, type=float, help='seigma of Loss function parameter')
-    parser.add_argument('--w_prun',     default=1, type=float, help='seigma of Loss function parameter')
+    parser.add_argument('--w_geom',     default=2, type=float, help='seigma of Loss function parameter')
+    parser.add_argument('--w_com',      default=2, type=float, help='seigma of Loss function parameter')
+    parser.add_argument('--w_prun',     default=3.5, type=float, help='seigma of Loss function parameter')
     parser.add_argument('--w_add',      default=1, type=float, help='seigma of Loss function parameter')
 
     """Compression"""
@@ -80,6 +80,7 @@ def parse_pugan_args(parser, file_day, file_time, dir_input):
     # parser.add_argument('--input_dir_test', default=f'../data/train/{dir_input}/8iVSLF/LongDress/longdress_vox10_1052.ply', type=str, help='path to folder of input point clouds')
     # parser.add_argument('--input_dir_test', default=f'../data/train/{dir_input}/UVG/CasualSquat/CasualSquat_UVG_raw_25_0_250_0000.ply', type=str, help='path to folder of input point clouds')
     parser.add_argument('--input_dir_test', default=f'../data/train/{dir_input}/UVG/CasualSquat', type=str, help='path to folder of input point clouds')
+    parser.add_argument('--max_files_test', default=5, type=int, help='maximum number of files to load for testing')
     parser.add_argument('--save_ply_dir', default=f'../data/test', type=str, help='path to save output point clouds')
     # parser.add_argument('--save_ply_dir', default=f'../data/test/{file_day}-{file_time}', type=str, help='path to save output point clouds')
     

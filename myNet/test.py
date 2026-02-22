@@ -96,7 +96,7 @@ def test(model, loss, args, writer):
                     patches, centroid, furthest_distance = normalize_point_cloud(input_pcd)  # (1, 3, N)
 
                 st_model = time.time()
-                gen_patches, _, _ = model.forward(patches)
+                gen_patches, L_prun, L_add = model.forward(patches)
                 en_model = time.time()
 
             st_fp = time.time()
@@ -111,9 +111,10 @@ def test(model, loss, args, writer):
             input_xyz = input_pcd[:, :3, :]  # [1, 3, N]
 
             # ---------- Loss計算 ----------
-            L, loss_geom, loss_bit, loss_num = loss.get_loss(args, pts_xyz, input_xyz)
+            L_geom, L_com, loss_bit, loss_num = loss.get_loss(args, pts_xyz, input_xyz)
+            L = args.w_geom*L_geom + args.w_com*L_com + args.w_prun*L_prun + args.w_add*L_add
             L_his.append(L.item())
-            L_geom_his.append(loss_geom.item())
+            L_geom_his.append(L_geom.item())
             L_bit_his.append(loss_bit.item())
             L_num_his.append(loss_num)
         

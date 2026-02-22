@@ -186,22 +186,13 @@ class AddModule(nn.Module):
         new_pts = torch.stack([x[:, :K_min] for x in new_pts_list], dim=0)  # (B,3,Kmin)
         add_idx = torch.stack([idx[:K_min] for idx in add_idx_list], dim=0) # (B,Kmin)
 
-        # ========= 追加: L_fit / L_rep =========
         L_fit = self._compute_L_fit(add_prob, offset)
         L_rep = self._compute_L_rep(new_pts)
 
         L_add = 0.0
         if self.cfgs.trainORtest == "train":
-            # ========= L_add（既存） =========
             mean_add_ratio = add_prob.mean(dim=1)  # (B,)
             L_cnt = ((mean_add_ratio - self.target_add_ratio) ** 2).mean()
-
-            # ds = density_score.squeeze(1)  # (B,N)
-            # ds_norm = ds / (ds.mean(dim=1, keepdim=True) + 1e-6)
-            # L_where = -(add_prob * ds_norm).mean()
-
-            # off_norm = offset.norm(dim=1)  # (B,N)
-            # L_off = (add_prob * (off_norm / (max_offset + 1e-8))).mean()
 
             L_add = (
                 self.add_cnt * L_cnt

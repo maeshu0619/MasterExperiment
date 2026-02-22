@@ -36,7 +36,10 @@ class PlyDirDataset(torch.utils.data.Dataset):
         そのファイルのみを扱う
     """
     def __init__(self, args, path):
-        max_files = args.max_files
+        if args.trainORtest == "train":
+            max_files = args.max_files
+        else:
+            max_files = args.max_files_test
         # 単一 ply ファイルの場合
         if os.path.isfile(path):
             if not path.endswith(".ply"):
