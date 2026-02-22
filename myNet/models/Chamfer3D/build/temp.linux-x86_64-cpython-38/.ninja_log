@@ -1,0 +1,5 @@
+# ninja log v7
+0	6146	1760858189489460203	/home/maejima/MasterEx2025/RepKPU/models/Chamfer3D/build/temp.linux-x86_64-cpython-38/chamfer3D.o	cd9f5bf7bac7cca3
+1	11258	1760858189493460218	/home/maejima/MasterEx2025/RepKPU/models/Chamfer3D/build/temp.linux-x86_64-cpython-38/chamfer_cuda.o	846fa8ecaef45dc6
+1	6456	1769234927396739906	/home/maejima/MasterEx/my_network/models/Chamfer3D/build/temp.linux-x86_64-cpython-38/chamfer3D.o	bc079af9e36f01a2
+1	11512	1769234927396739906	/home/maejima/MasterEx/my_network/models/Chamfer3D/build/temp.linux-x86_64-cpython-38/chamfer_cuda.o	737428d2f597d701

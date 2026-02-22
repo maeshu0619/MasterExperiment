@@ -1,0 +1,20 @@
+# ninja log v7
+2	5179	1760858202469508233	/home/maejima/MasterEx2025/RepKPU/models/pointops/build/temp.linux-x86_64-cpython-38/src/grouping/grouping_cuda.o	ab27739c71be4a4b
+3	5192	1760858202469508233	/home/maejima/MasterEx2025/RepKPU/models/pointops/build/temp.linux-x86_64-cpython-38/src/interpolation/interpolation_cuda.o	b28f374802976d28
+4	5298	1760858202469508233	/home/maejima/MasterEx2025/RepKPU/models/pointops/build/temp.linux-x86_64-cpython-38/src/knnquery/knnquery_cuda.o	eae2b36c24f88858
+5	5304	1760858202473508248	/home/maejima/MasterEx2025/RepKPU/models/pointops/build/temp.linux-x86_64-cpython-38/src/knnquery_heap/knnquery_heap_cuda.o	a98b1e858aa9c171
+2	5359	1760858202469508233	/home/maejima/MasterEx2025/RepKPU/models/pointops/build/temp.linux-x86_64-cpython-38/src/featuredistribute/featuredistribute_cuda.o	f2762c2477c62a38
+3	5362	1760858202469508233	/home/maejima/MasterEx2025/RepKPU/models/pointops/build/temp.linux-x86_64-cpython-38/src/grouping_int/grouping_int_cuda.o	df4f168f8450f224
+7	5405	1760858202473508248	/home/maejima/MasterEx2025/RepKPU/models/pointops/build/temp.linux-x86_64-cpython-38/src/sampling/sampling_cuda.o	de6fbd9948d8402a
+1	5473	1760858202469508233	/home/maejima/MasterEx2025/RepKPU/models/pointops/build/temp.linux-x86_64-cpython-38/src/ballquery/ballquery_cuda.o	fd6d504bec4bc957
+6	5718	1760858202473508248	/home/maejima/MasterEx2025/RepKPU/models/pointops/build/temp.linux-x86_64-cpython-38/src/labelstat/labelstat_cuda.o	d967b993d1d3d527
+4	11727	1760858202469508233	/home/maejima/MasterEx2025/RepKPU/models/pointops/build/temp.linux-x86_64-cpython-38/src/interpolation/interpolation_cuda_kernel.o	dd8aa3046f4b315a
+2	11861	1760858202469508233	/home/maejima/MasterEx2025/RepKPU/models/pointops/build/temp.linux-x86_64-cpython-38/src/featuredistribute/featuredistribute_cuda_kernel.o	4a2aec97a4a49ece
+4	11885	1760858202469508233	/home/maejima/MasterEx2025/RepKPU/models/pointops/build/temp.linux-x86_64-cpython-38/src/knnquery/knnquery_cuda_kernel.o	35156dcc9c4b8822
+6	11892	1760858202473508248	/home/maejima/MasterEx2025/RepKPU/models/pointops/build/temp.linux-x86_64-cpython-38/src/labelstat/labelstat_cuda_kernel.o	210417527bad9cb5
+7	11969	1760858202473508248	/home/maejima/MasterEx2025/RepKPU/models/pointops/build/temp.linux-x86_64-cpython-38/src/sampling/sampling_cuda_kernel.o	28053d9caec6da3
+1	12025	1760858202469508233	/home/maejima/MasterEx2025/RepKPU/models/pointops/build/temp.linux-x86_64-cpython-38/src/ballquery/ballquery_cuda_kernel.o	d9377555c75298e8
+3	12040	1760858202469508233	/home/maejima/MasterEx2025/RepKPU/models/pointops/build/temp.linux-x86_64-cpython-38/src/grouping_int/grouping_int_cuda_kernel.o	f53cf818e8a311fd
+3	12126	1760858202469508233	/home/maejima/MasterEx2025/RepKPU/models/pointops/build/temp.linux-x86_64-cpython-38/src/grouping/grouping_cuda_kernel.o	7aec55a2d7904bc0
+5	12210	1760858202473508248	/home/maejima/MasterEx2025/RepKPU/models/pointops/build/temp.linux-x86_64-cpython-38/src/knnquery_heap/knnquery_heap_cuda_kernel.o	a85d02770c451e69
+7	15519	1760858202473508248	/home/maejima/MasterEx2025/RepKPU/models/pointops/build/temp.linux-x86_64-cpython-38/src/pointops_api.o	4e41e2fa721920e4
