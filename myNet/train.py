@@ -122,18 +122,15 @@ def train(model, args, loss, file_date, writer):
     """==========================================================="""
     """トレーニング"""
     """==========================================================="""
-    writer.write('■■■■ Begin Training ■■■■')
-    best_cd = 10000
-
     for episode in range(args.episodes):
-        writer.write(f"◆◆◆ Episode {episode + 1} / {args.episodes} ◆◆◆\n")
+        writer.write(f"◆◆◆ Episode {episode + 1} / {args.episodes} ◆◆◆")
         model.train()
         epi_loss = 0.0
         epi_loss_geom = 0.0
         epi_loss_bit = 0.0
         epi_loss_num = 0.0
         for epoch, seq_dir in enumerate(seq_dirs):
-            writer.write(f"●●● Epoch {epoch + 1}/{num_seq} : {seq_dir} ●●●\n")
+            writer.write(f"●●● Epoch {epoch + 1}/{num_seq} : {seq_dir} ●●●")
             dataset = PlyDirDataset(args, seq_dir)
             loader = torch.utils.data.DataLoader(
                 dataset,
@@ -200,7 +197,7 @@ def train(model, args, loss, file_date, writer):
                         patches, centroid, furthest_distance = normalize_point_cloud(input_pcd)  # (1, 3, N)
 
                     st_model = time.time()
-                    gen_patches, loss_prun, loss_add = model.forward(patches)
+                    gen_patches, L_prun, L_add = model.forward(patches)
                     en_model = time.time()
 
 
@@ -214,21 +211,21 @@ def train(model, args, loss, file_date, writer):
                 input_xyz = input_pcd[:, :3, :]  # [1, 3, N]
 
                 # ---------- Loss計算と最適化 ----------
-                L, loss_geom, loss_bit, loss_num = loss.get_loss(args, pts_xyz, input_xyz)
-                L = L + loss_prun + loss_add
-                writer.write(f"total L->{L.item()}")
+                L_geom, L_com, loss_bit, loss_num = loss.get_loss(args, pts_xyz, input_xyz)
+                L = args.w_geom*L_geom + args.w_com*L_com + args.w_prun*L_prun + args.w_add*L_add
+                writer.write(f"L       :{L:.4f}->L_geom:{L_geom:.4f}, L_com:{L_com:.4f}, L_prun:{L_prun:.4f}, L_add:{L_add:.4f}\n")
                 L.backward()
                 optimizer.step()
 
                 # ログ（lossは training で計算した平均の合計）
                 epoch_loss += L.item()
-                epoch_loss_geom += loss_geom.item()
+                epoch_loss_geom += L_geom.item()
                 epoch_loss_bit += loss_bit.item()
                 epoch_loss_num += loss_num
                 
                 en_step = time.time()
                 
-                mem(f"Epi{episode + 1}/Epo{epoch + 1}/Step{step + 1}:{en_step-st_step} s | ")
+                print(f"Epi{episode + 1}/Epo{epoch + 1}/Step{step + 1}:{en_step-st_step}s   |   {datetime.datetime.now().strftime('%Y/%m/%d %H:%M:%S')}")
 
             # lr scheduler
             scheduler_steplr.step()
@@ -275,18 +272,18 @@ def train(model, args, loss, file_date, writer):
                 title=f"Num Loss Curve ({args.loss_type})"
             )
 
-            if avg_epoch_loss < best_loss:
-                best_loss = avg_epoch_loss
-                if args.prune:
-                    model_name = f'{data_input}_{args.loss_type}.pth'
-                else:
-                    model_name = f'{data_input}_{args.loss_type}_nonPrune.pth'
-                model_path = os.path.join(ckpt_dir, model_name)
-                torch.save(model.state_dict(), model_path)
-                writer.write(
-                    f"New best model at epoch {epoch+1}, "
-                    f"avg_epoch_loss={best_loss:.6f}\n"
-                )
+            # if avg_epoch_loss < best_loss:
+            #     best_loss = avg_epoch_loss
+            #     if args.prune:
+            #         model_name = f'{data_input}_{args.loss_type}.pth'
+            #     else:
+            #         model_name = f'{data_input}_{args.loss_type}_nonPrune.pth'
+            #     model_path = os.path.join(ckpt_dir, model_name)
+            #     torch.save(model.state_dict(), model_path)
+            #     writer.write(
+            #         f"New best model at epoch {epoch+1}, "
+            #         f"avg_epoch_loss={best_loss:.6f}\n"
+            #     )
 
         avg_epi_loss = epi_loss / num_seq
         avg_epi_loss_geom = epi_loss_geom / num_seq
@@ -326,6 +323,16 @@ def train(model, args, loss, file_date, writer):
             xl = "Episode"
         )
 
+        if avg_epi_loss < best_loss:
+            best_loss = avg_epi_loss
+            model_name = f'{data_input}_{args.loss_type}.pth'
+            model_path = os.path.join(ckpt_dir, model_name)
+            torch.save(model.state_dict(), model_path)
+            writer.write(
+                f"New best model at epoch {epoch+1}, "
+                f"avg_epi_loss={best_loss:.6f}\n"
+            )
+
 if __name__ == '__main__':
     """=== セットアップ ==="""
     # トレーニングInfoのセットアップ
@@ -342,8 +349,7 @@ if __name__ == '__main__':
     writer.write(f"Date of Training: {file_day}-{file_time}")
     writer.write(f"Loss Type: {args.loss_type}")
 
-    print(f"Pruning Module used: {args.prune}")
-    writer.write(f"Pruning Module used: {args.prune}")
+    writer.write(f"Loss Weight: {args.w_geom}, {args.w_com}, {args.w_prun}, {args.w_add}")
 
     if args.split2patch:
         writer.write(f"Model Input is Patch")

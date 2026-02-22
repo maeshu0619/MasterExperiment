@@ -7,7 +7,7 @@ class AddModule(nn.Module):
     追加領域 + 追加点数 + 追加ベクトルを同時に学習するAdd
     - TopKを使わない（非微分を排除）
     - Binary Concrete で追加マスクを生成
-    - 返り値に add_loss を含める
+    - 返り値に L_add を含める
     """
 
     def __init__(self, cfgs, writer):
@@ -21,17 +21,13 @@ class AddModule(nn.Module):
         # Gumbel-Sigmoid温度
         self.tau = float(getattr(cfgs, "add_tau", 0.5))
 
-        # 目標追加率（例: 0.05 なら Nの5%を追加）
+        # 目標追加率
         self.target_add_ratio = float(getattr(cfgs, "target_add_ratio", 0.05))
 
-        # 損失重み（既存）
-        self.lambda_cnt = float(getattr(cfgs, "lambda_add_cnt", 1.0))
-        self.lambda_where = float(getattr(cfgs, "lambda_add_where", 1.0))
-        self.lambda_off = float(getattr(cfgs, "lambda_add_off", 1.0))
-
-        # 追加: RepKPU由来の正則化（fit / rep）
-        self.lambda_fit = float(getattr(cfgs, "lambda_add_fit", 100))
-        self.lambda_rep = float(getattr(cfgs, "lambda_add_rep", 1000))
+        # 損失重み
+        self.add_cnt = cfgs.add_cnt
+        self.add_fit = cfgs.add_fit
+        self.add_rep = cfgs.add_rep
 
         # fit正規化用（RepKPUのconv_radius相当）
         self.conv_radius = float(getattr(cfgs, "add_conv_radius", 1.0))
@@ -144,7 +140,7 @@ class AddModule(nn.Module):
           new_pts  : (B,3,Kmin)
           add_prob : (B,1,N)
           add_idx  : (B,Kmin)
-          add_loss : scalar
+          L_add : scalar
         """
         B, _, N = pts.shape
 
@@ -164,10 +160,6 @@ class AddModule(nn.Module):
         max_offset = float(getattr(self.cfgs, "max_offset", 1.0))
         offset = dir_vec * (mag.unsqueeze(1) * max_offset)    # (B,3,N)
 
-
-        # ======================================================
-        # 実際に追加（mask>0.5 の点から new_pts を生成）
-        # ======================================================
         new_pts_list = []
         add_idx_list = []
 
@@ -198,9 +190,9 @@ class AddModule(nn.Module):
         L_fit = self._compute_L_fit(add_prob, offset)
         L_rep = self._compute_L_rep(new_pts)
 
-        add_loss = 0.0
+        L_add = 0.0
         if self.cfgs.trainORtest == "train":
-            # ========= add_loss（既存） =========
+            # ========= L_add（既存） =========
             mean_add_ratio = add_prob.mean(dim=1)  # (B,)
             L_cnt = ((mean_add_ratio - self.target_add_ratio) ** 2).mean()
 
@@ -211,31 +203,22 @@ class AddModule(nn.Module):
             # off_norm = offset.norm(dim=1)  # (B,N)
             # L_off = (add_prob * (off_norm / (max_offset + 1e-8))).mean()
 
-            add_loss = (
-                # self.lambda_cnt * L_cnt
+            L_add = (
+                self.add_cnt * L_cnt
                 # + self.lambda_where * L_where
                 # + self.lambda_off * L_off
-                # + self.lambda_fit * L_fit
-                # + self.lambda_rep * L_rep
-                self.lambda_fit * L_fit
-                + self.lambda_rep * L_rep
+                # + self.add_fit * L_fit
+                # + self.add_rep * L_rep
+                + self.add_fit * L_fit
+                + self.add_rep * L_rep
             )
 
             if self.writer is not None and hasattr(self.writer, "write"):
-                self.writer.write(
-                    f"add_loss: {add_loss} -> "
-                    f"L_cnt:{L_cnt}, "
-                    f"L_fit:{L_fit}, L_rep:{L_rep}, "
-                    # f"mean_add_ratio:{mean_add_ratio.mean().item():.4f}, Kmin:{K_min}"
-                )
-                # self.writer.write(
-                #     f"add_loss: {add_loss} -> "
-                #     f"L_fit:{L_fit}, L_rep:{L_rep}, "
-                # )
+                self.writer.write(f"L_add   :{L_add:.4f}>L_cnt:{L_cnt:.4f}, L_fit:{L_fit:.4f}, L_rep:{L_rep:.4f}, AddRatio:{mean_add_ratio.item():.4f}")
 
         self.last_add_prob = add_prob
         self.last_add_mask = add_mask
-        self.last_add_loss = add_loss
+        self.last_add_loss = L_add
 
         pts_add = torch.cat([pts, new_pts], dim=2)  # (B,3,N+Kmin)
-        return pts_add, new_pts, add_prob.unsqueeze(1), add_idx, add_loss
+        return pts_add, new_pts, add_prob.unsqueeze(1), add_idx, L_add

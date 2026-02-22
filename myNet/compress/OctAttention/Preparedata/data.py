@@ -22,7 +22,7 @@ import pt as pointCloud
 
 def dataPrepare(args, pts,saveMatDir='Data',qs=2,ptNamePrefix='',offset='min',qlevel=None,rotation=False,normalize=False):
     p = pts
-    ptName = f'pointcloud_{args.loss_type}_{args.a}_{args.b}_{args.c}_{args.d}_{args.e}'
+    ptName = f'pointcloud_{args.date}-{args.time}'
     
     refPt = p
     if normalize is True: # normalize pc to [-1,1]^3

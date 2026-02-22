@@ -53,12 +53,18 @@ def parse_pugan_args(parser, file_day, file_time, dir_input):
     parser.add_argument('--loss_type', default='cd', type=str, help='what kind of loss function for geometry')
 
     # 損失関数のパラメータ
-    parser.add_argument('--a', default=1, type=float, help='alpha of Loss function parameter')
-    parser.add_argument('--b', default=500, type=float, help='beta of Loss function parameter')
-    parser.add_argument('--c', default=10, type=float, help='gamma of Loss function parameter')
-    parser.add_argument('--d', default=10, type=float, help='seigma of Loss function parameter')
-    parser.add_argument('--e', default=100, type=float, help='omega of Loss function parameter')
-    parser.add_argument('--f', default=10, type=float, help='omega of Loss function parameter')
+    parser.add_argument('--com_bit',    default=5*100, type=float, help='alpha of Loss function parameter')
+    parser.add_argument('--com_sin',    default=0.5*100, type=float, help='beta of Loss function parameter')
+    parser.add_argument('--com_node',   default=0.8*100, type=float, help='gamma of Loss function parameter')
+    parser.add_argument('--prun_cnt',   default=10*100, type=float, help='gamma of Loss function parameter')
+    parser.add_argument('--prun_out',   default=1*100, type=float, help='gamma of Loss function parameter')
+    parser.add_argument('--add_cnt',    default=3*100, type=float, help='gamma of Loss function parameter')
+    parser.add_argument('--add_fit',    default=1*100, type=float, help='gamma of Loss function parameter')
+    parser.add_argument('--add_rep',    default=1*100, type=float, help='gamma of Loss function parameter')
+    parser.add_argument('--w_geom',     default=3, type=float, help='seigma of Loss function parameter')
+    parser.add_argument('--w_com',      default=10, type=float, help='seigma of Loss function parameter')
+    parser.add_argument('--w_prun',     default=1, type=float, help='seigma of Loss function parameter')
+    parser.add_argument('--w_add',      default=1, type=float, help='seigma of Loss function parameter')
 
     """Compression"""
     parser.add_argument('--compress', default='OctAttention', type=str, help='what kind of compression')

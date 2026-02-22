@@ -29,11 +29,7 @@ def _octseq_worker_main(conn):
     Octree生成・matloaderなど「CPU/IO/メモリを食う処理」専用プロセス。
     ここで起きるメモリの溜まりは、このプロセスを再起動すればOSが回収する。
     """
-
-    # 重要：このプロセスはGPUを絶対に触らない（GPUメモリ増加を防ぐ）
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
-
-    # 重要：スレッド数を絞り、CPU暴騰を抑える（必要なら調整）
     try:
         import torch
         torch.set_num_threads(1)
@@ -92,15 +88,13 @@ class SimpleNamespace:
 
 class Loss:
     def __init__(self, args, file_date, writer):
-        self.alpha = args.a
-        self.beta = args.b
-        self.gamma = args.c
-        self.sigma = args.d
-        self.omega = args.e
+        self.com_bit = args.com_bit
+        self.com_sin = args.com_sin
+        self.com_node = args.com_node
+
         self.compress = args.compress
         self.file_date = file_date
         self.writer = writer
-        self.writer.write(f"Loss parameter: {args.a}, {args.b}, {args.c}, {args.d}, {args.e}")
         self.bptt = args.bptt
         self.ncl = ManifoldnessConstraint(support=8, neighborhood_size=32).to(device)
         if self.compress == "OctAttention":
@@ -135,19 +129,6 @@ class Loss:
                     pass
 
             atexit.register(_cleanup_oct_worker)
-
-    # def _run_octattention_encoder(self, args, pts):
-    #     with torch.no_grad(): 
-    #         self.model.eval()
-    #         return oa_main(
-    #             args,
-    #             pts=pts.to(device),
-    #             model=self.model,
-    #             qs=self.qs,
-    #             writer=self.writer,
-    #             file_date=self.file_date, 
-    #             oa_comp=self.oa_comp
-    #         )
 
     def _run_octattention_encoder(self, args, pts):
         """
@@ -231,17 +212,18 @@ class Loss:
                         com_gt.append(None)
 
             # ===== Geometry Loss =====
-            loss_geom = 0.0
+            L_geom = 0.0
             if args.loss_type == "cd":
-                loss_geom = chamfer_l2_loss(gen_pts, gt_pts)
+                L_geom = chamfer_l2_loss(gen_pts, gt_pts)
+                self.writer.write(f"L_geom  :{L_geom.item():.4f}->L_cd:{L_geom.item():.4f}")
             elif args.loss_type == "p2p":
                 gt_normals = estimate_normals_open3d(gt_pts, k=16)
-                loss_geom = point2plane_loss(
+                L_geom = point2plane_loss(
                     gen_pts, gt_pts,
                     gt_normals=gt_normals, k=16
                 )
             elif args.loss_type == "psnr":
-                loss_geom = 1-psnr_loss(gen_pts, gt_pts)
+                L_geom = 1-psnr_loss(gen_pts, gt_pts)
             elif args.loss_type == "cd+p2p":
                 loss_cd = chamfer_l2_loss(gen_pts, gt_pts)
                 gt_normals = estimate_normals_open3d(gt_pts, k=16)
@@ -249,20 +231,20 @@ class Loss:
                     gen_pts, gt_pts,
                     gt_normals=gt_normals, k=16
                 )
-                loss_geom = loss_cd + 0.1 * loss_p2p
+                L_geom = loss_cd + 0.1 * loss_p2p
             elif args.loss_type == "cd+nc":
                 loss_cd = chamfer_l2_loss(gen_pts, gt_pts)
                 y = time.time()
                 loss_nc = self.ncl(gen_pts)
                 z = time.time()
-                loss_geom = 0.1 * loss_cd + 100 * loss_nc
-                self.writer.write(f"Loss_nc:{loss_nc.item()}, Loss_cd:{loss_cd}, Total:{loss_geom.item()}")
+                L_geom = 0.1 * loss_cd + 100 * loss_nc
+                self.writer.write(f"Loss_nc:{loss_nc.item()}, Loss_cd:{loss_cd}, Total:{L_geom.item()}")
             elif args.loss_type == "p2p+ncl":
                 gt_normals = estimate_normals_open3d(gt_pts, k=16)
                 loss_p2p = point2plane_loss(gen_pts, gt_pts, gt_normals)
                 loss_ncl = normal_consistency_loss(gen_pts, gt_pts, gt_normals)
 
-                loss_geom = loss_p2p + 0.1 * loss_ncl
+                L_geom = loss_p2p + 0.1 * loss_ncl
             else:
                 raise ValueError(f"Unknown loss_type: {args.loss_type}")
             
@@ -279,16 +261,18 @@ class Loss:
             loss_single = (com[3]-com_gt[3])/com_gt[3]
             loss_nodes = (com[4]-com_gt[4])/com_gt[4]
 
-            loss_num = abs(gen_pts.shape[2]-gt_pts.shape[2])/gt_pts.shape[2]
-                    
+            loss_num = (gen_pts.shape[2]-gt_pts.shape[2])/gt_pts.shape[2]
+
             if loss_bit > 0: # 圧縮効率が悪化した場合ペナルティを大きく
-                beta = self.beta * 5
+                com_bit = self.com_bit * 5
             else:
-                beta = self.beta
-            Loss = self.alpha*loss_geom + beta*loss_bit + self.gamma*loss_single + self.sigma*loss_nodes
-            self.writer.write(f"Loss:{Loss.item()}->L_geom:{loss_geom.item()}, L_bit:{loss_bit}, L_single:{loss_single}, L_nodes:{loss_nodes}")
+                com_bit = self.com_bit
+            # === Compression Loss ===
+            L_com = com_bit*loss_bit + self.com_sin*loss_single + self.com_node*loss_nodes
+
+            self.writer.write(f"L_com   :{L_com:.4f}->L_bit:{loss_bit:.4f}, L_single:{loss_single:.4f}, L_nodes:{loss_nodes:.4f}")
+            # Loss = self.alpha*L_geom + L_com
+            # self.writer.write(f"Loss:{Loss.item()}->L_geom:{L_geom.item()}, L_bit:{loss_bit}, L_single:{loss_single}, L_nodes:{loss_nodes}")
             # self.writer.write(f"=== Loss Function ===")
 
-            return Loss, loss_geom, loss_bit, (gen_pts.shape[2]-gt_pts.shape[2])/gt_pts.shape[2]
-        else:
-            return 0.0
+            return L_geom, L_com, loss_bit, loss_num

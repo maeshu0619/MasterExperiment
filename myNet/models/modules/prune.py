@@ -17,9 +17,9 @@ class PruningModule(nn.Module):
         num_blocks = getattr(cfgs, "prune_num_blocks", 3)
 
         self.tau = getattr(cfgs, "prune_tau", 0.5)
-        self.target_ratio = getattr(cfgs, "prune_target_keep_ratio", 0.9)
-        self.lambda_count = getattr(cfgs, "lambda_count", 500.0)
-        self.lambda_out = getattr(cfgs, "lambda_out", 250.0)
+        self.target_ratio = getattr(cfgs, "prune_target_keep_ratio", 0.93)
+        self.prun_cnt = cfgs.prun_cnt
+        self.prun_out = cfgs.prun_out
 
         self.conv_in = nn.Conv1d(in_dim, hidden, 1)
         self.blocks = nn.ModuleList(
@@ -54,9 +54,6 @@ class PruningModule(nn.Module):
 
         mask, keep_prob = self.sample_binary_concrete(logit)
 
-        # ==============================
-        # 削除損失をここで計算
-        # ==============================
         # ---- 削除点数制御 ----
         mean_ratio = keep_prob.mean(dim=1)
         L_cnt = ((mean_ratio - self.target_ratio) ** 2).mean()
@@ -68,12 +65,8 @@ class PruningModule(nn.Module):
 
         prune_loss = 0.0
         if self.cfgs.trainORtest == "train":
-            prune_loss = self.lambda_count * L_cnt + self.lambda_out * L_out
-            self.writer.write(f"prune_loss: {prune_loss}->L_cnt: {L_cnt}, L_out: {L_out}")
-
-        # ==============================
-        # 実際に削除
-        # ==============================
+            prune_loss = self.prun_cnt * L_cnt + self.prun_out * L_out
+            self.writer.write(f"L_prun  :{prune_loss:.4f}->L_cnt:{L_cnt:.4f}, L_out:{L_out:.4f}, KeepRatio:{mean_ratio.item():.4f}")
 
         pts_kept_list = []
         keep_idx_list = []
