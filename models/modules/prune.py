@@ -12,7 +12,7 @@ class PruningModule(nn.Module):
         self.cfgs = cfgs
         self.writer = writer
 
-        in_dim = cfgs.fp_mlp_channels[-1] + 2
+        in_dim = cfgs.fp_mlp_channels[-1] + 2 + cfgs.octree_ctx_dim
         hidden = cfgs.prune_hidden_dim
         num_blocks = getattr(cfgs, "prune_num_blocks", 3)
 
@@ -41,92 +41,84 @@ class PruningModule(nn.Module):
 
         return mask, prob
 
-    def forward(self, pts, Ff, d, s):
-
+    def forward(self, pts, Ff, d, s, o):
         B, _, N = pts.shape
-        c = torch.cat([Ff, d, s], dim=1)
+        c = torch.cat([Ff, d, s, o], dim=1)
 
         net = self.conv_in(c)
         for block in self.blocks:
             net = block(net, c)
 
-        logit = self.conv_out(self.act_out(self.bn_out(net))).squeeze(1)
-        keep_prob = torch.sigmoid(logit)  # [B, N]
+        logit = self.conv_out(self.act_out(self.bn_out(net))).squeeze(1)   # (B,N)
+        keep_prob = torch.sigmoid(logit)                                   # (B,N)
 
-        # 学習はConcrete、推論はtopk（乱数なし）にする
-        if self.cfgs.trainORtest == "train":
-            mask, keep_prob_st = self.sample_binary_concrete(logit)
-            # 損失計算はST側の確率でやる（勾配を通す）
-            keep_for_loss = keep_prob_st
-        else:
-            mask = None
-            keep_for_loss = keep_prob
+        """=== Hard ==="""
+        K_keep = max(1, int(round(N * float(self.target_ratio))))
 
-        # ---- 削除点数制御（後で変更2も反映）----
-        mean_ratio = keep_for_loss.mean(dim=1)
-        L_cnt = (abs(mean_ratio - self.target_ratio)).mean()
+        keep_idx_hard = torch.topk(keep_prob, k=K_keep, dim=1, largest=True).indices  # (B,K_keep)
+        keep_idx_hard = torch.sort(keep_idx_hard, dim=1).values                        # (B,K_keep)
 
-        # ---- 外れ点抑制（自己教師 + robust重み）----
-        # d: [B,1,N]（密度スコア or 近傍距離スコアかは未確定）
-        score = d.squeeze(1)  # [B,N]
+        hard_mask = torch.zeros_like(keep_prob)                                         # (B,N)
+        hard_mask.scatter_(1, keep_idx_hard, 1.0)                                       # (B,N)
+
+        hard_ratio = hard_mask.mean(dim=1)                                              # (B,)
+
+        idx_expand = keep_idx_hard.unsqueeze(1).expand(-1, 3, -1)                       # (B,3,K_keep)
+        pts_hard = torch.gather(pts, 2, idx_expand)                                     # (B,3,K_keep)
+
+        """=== Soft ==="""
+        thr = torch.gather(keep_prob, 1, keep_idx_hard[:, -1:].detach())                # (B,1)
+
+        tau_match = float(getattr(self.cfgs, "prune_soft_match_tau", 0.05))
+        tau_match = max(tau_match, 1e-6)
+
+        soft_mask_raw = torch.sigmoid((keep_prob - thr) / tau_match)                    # (B,N)
+
+        soft_mean_det = soft_mask_raw.mean(dim=1, keepdim=True).detach()                # (B,1)
+        scale = hard_ratio.unsqueeze(1) / (soft_mean_det + 1e-12)                       # (B,1)
+        soft_mask = (soft_mask_raw * scale).clamp(0.0, 1.0)                             # (B,N)
+
+        """=== STE ==="""
+        mask_st = hard_mask - soft_mask.detach() + soft_mask                            # (B,N)
+        keep_w_full = mask_st.unsqueeze(1)                                              # (B,1,N)
+
+        # Hardで残した点に対応する重みだけを返す
+        keep_w_hard = torch.gather(
+            keep_w_full, 2, keep_idx_hard.unsqueeze(1)
+        )                                                                               # (B,1,K_keep)
+
+        """=== Calculate Loss ==="""
+        target_ratio = torch.full_like(hard_ratio, float(self.target_ratio))            # (B,)
+        mean_keep_ratio_pred = soft_mask_raw.mean(dim=1)                                # (B,)
+
+        delta_cnt = (mean_keep_ratio_pred - target_ratio).abs()
+        L_cnt = torch.log1p(128 * delta_cnt).mean()
+
+        """=== Calculate Outlier Suppression Loss ==="""
+        score = d.squeeze(1)  # (B,N)
         eps = 1e-6
 
         high_is_inlier = getattr(self.cfgs, "prune_d_high_is_inlier", True)
         r = (1.0 / (score + eps)) if high_is_inlier else score
-        r = r / (r.mean(dim=1, keepdim=True) + eps) # 正規化
+        r = r / (r.mean(dim=1, keepdim=True) + eps)
 
-        # robust重み（外れほど0に近づく）
-        c = float(getattr(self.cfgs, "prune_robust_c", 2.0))
-        w_inlier = 1.0 / (1.0 + (r / c) ** 2)  # [B,N]
-        w_inlier = w_inlier.detach()  # 自己教師なので勾配を切る
-        L_out = torch.nn.functional.mse_loss(keep_for_loss, w_inlier)
+        c_robust = float(getattr(self.cfgs, "prune_robust_c", 2.0))
+        w_inlier = 1.0 / (1.0 + (r / c_robust) ** 2)   # (B,N)
+        w_inlier = w_inlier.detach()
 
-        prune_loss = 0.0
-        if self.cfgs.trainORtest == "train":
-            prune_loss = self.prun_cnt * L_cnt + self.prun_out * L_out
+        L_out = torch.nn.functional.mse_loss(mask_st, w_inlier)
+
+        loss_prun = self.prun_cnt * L_cnt + self.prun_out * L_out
+
+        pts_soft = pts
+
+        if self.writer is not None and hasattr(self.writer, "write"):
             self.writer.write(
-                f"L_prun  :{prune_loss:.4f}->L_cnt:{L_cnt:.4f}, L_out:{L_out:.4f}, KeepRatio:{mean_ratio.mean().item():.4f}"
+                f"L_prun  :{loss_prun:.4f}->"
+                f"L_cnt:{L_cnt:.4f}, L_out:{L_out:.4f}, "
+                f"KeepRatio(pred_raw):{mean_keep_ratio_pred.mean().item():.6f}, "
+                f"KeepRatio(soft):{soft_mask.mean(dim=1).mean().item():.6f}, "
+                f"KeepRatio(hard):{hard_ratio.mean().item():.6f}"
             )
 
-        # ---- 点の選択：推論は必ず topk で固定点数を残す ----
-        pts_kept_list = []
-        keep_idx_list = []
-
-        # 残す点数を固定（入力Nに対して target_ratio を満たす）
-        K_keep = max(1, int(round(N * float(self.target_ratio))))
-
-        for b in range(B):
-            if self.cfgs.trainORtest == "train":
-                # 学習中はConcreteのhard maskを尊重（ただし空ならtopkで救済）
-                valid = mask[b] > 0.5
-                idx = torch.where(valid)[0]
-                if idx.numel() == 0:
-                    idx = torch.topk(keep_prob[b], k=1).indices
-                # 学習でも点数がバラつくので、最終的に topk で揃える（塊落ち抑制）
-                if idx.numel() > K_keep:
-                    idx = idx[torch.topk(keep_prob[b, idx], k=K_keep).indices]
-                elif idx.numel() < K_keep:
-                    idx = torch.topk(keep_prob[b], k=K_keep).indices
-            else:
-                # 推論は乱数なしで必ずK_keep
-                idx = torch.topk(keep_prob[b], k=K_keep).indices
-
-            pts_kept_list.append(pts[b, :, idx])
-            keep_idx_list.append(idx)
-
-        K_min = min(x.shape[1] for x in pts_kept_list)
-        pts_pruned = torch.stack([x[:, :K_min] for x in pts_kept_list], dim=0)
-        keep_idx = torch.stack([idx[:K_min] for idx in keep_idx_list], dim=0)
-
-        keep_w = keep_for_loss.unsqueeze(1)
-        
-        # prune.py の forward の最後（学習時分岐を追加）
-        if self.cfgs.trainORtest == "train":
-            keep_w = keep_for_loss.unsqueeze(1)  # [B,1,N]
-            # 学習時は点を削らずに返す（idxはダミーでも良いが、下流が使うなら全点）
-            keep_idx = torch.arange(N, device=pts.device).unsqueeze(0).repeat(B,1)
-            pts_pruned = pts  # [B,3,N]
-            return pts_pruned, keep_idx, prune_loss, keep_w
-        else:
-            # 既存の topk 選択を維持
-            return pts_pruned, keep_idx, prune_loss, None
+        return pts_soft, pts_hard, keep_w_hard, soft_mask_raw, keep_idx_hard, loss_prun

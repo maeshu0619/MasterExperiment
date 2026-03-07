@@ -245,17 +245,29 @@ class AddModule(nn.Module):
         return rep.sum() / (ww.sum() + 1e-12)
 
     def forward(self, pts, feats, density_score, structure_score, octree_score):
+        """
+        pts             : (B,3,N)
+        feats           : (B,C_l,N)
+        density_score   : (B,1,N)
+        structure_score : (B,1,N)
+
+        return:
+        pts_add_soft : (B,3,N)
+        pts_add_hard : (B,3,N+K)
+        new_pts_soft : (B,3,N)
+        new_pts_hard : (B,3,K)
+        add_w        : (B,1,N)  # Hard選択を近似するSoft重み
+        add_idx      : (B,K)
+        loss_add     : scalar
+        """
         B, _, N = pts.shape
 
-        # 追加点数を固定的に決める
         max_add_points = max(1, int(self.max_ratio * N))
-        K = max(1, int(self.target_add_ratio * N))
-        K = min(K, max_add_points)
+        min_add = max(1, int(self.target_add_ratio * N))
 
         x = torch.cat([pts, feats, density_score, structure_score, octree_score], dim=1)
         h = self.mlp_shared(x)
 
-        # 各点の追加スコア
         add_logit = self.mlp_add_logit(h).squeeze(1)                 # (B,N)
         add_mask, add_prob = self._sample_binary_concrete(add_logit) # (B,N), (B,N)
 
@@ -267,53 +279,81 @@ class AddModule(nn.Module):
         max_offset = float(getattr(self.cfgs, "max_offset", 1.0))
         offset = dir_vec * (mag.unsqueeze(1) * max_offset)           # (B,3,N)
 
-        # 全追加候補点
-        new_pts_all = pts + offset
-        
-        """=== Hard ==="""
-        add_idx = torch.topk(add_prob, k=K, dim=1, largest=True).indices   # (B,K)
-        add_idx = torch.sort(add_idx, dim=1).values                        # (B,K)
+        # Soft側の追加候補点
+        new_pts_soft = pts + offset                                  # (B,3,N)
+        pts_add_soft = pts                                           # 学習時は点数を増やさない
 
-        hard_mask = torch.zeros_like(add_prob)                             # (B,N)
-        hard_mask.scatter_(1, add_idx, 1.0)                                # (B,N)
+        # -----------------------------
+        # Hard側: 実際に追加する点を選ぶ
+        # -----------------------------
+        new_pts_list = []
+        add_idx_list = []
+        thr_list = []
+        hard_ratio_list = []
 
-        # Hard の実追加率
-        hard_ratio = hard_mask.mean(dim=1) 
+        for b in range(B):
+            valid = add_mask[b] > 0.5
+            idx = torch.where(valid)[0]
 
-        idx_expand = add_idx.unsqueeze(1).expand(-1, 3, -1)                # (B,3,K)
-        new_pts_hard = torch.gather(new_pts_all, 2, idx_expand)           # (B,3,K)
-        pts_add_hard = torch.cat([pts, new_pts_hard], dim=2)     
-    
-        """=== Soft ==="""
-        thr = torch.gather(add_prob, 1, add_idx[:, -1:].detach())          # (B,1)
+            if idx.numel() > max_add_points:
+                idx = torch.topk(add_prob[b], k=max_add_points, largest=True).indices
+
+            if idx.numel() < min_add:
+                idx = torch.topk(add_prob[b], k=min_add, largest=True).indices
+
+            idx = torch.sort(idx).values
+
+            pts_sel = pts[b, :, idx]
+            off_sel = offset[b, :, idx]
+            new_pts_b = pts_sel + off_sel
+
+            new_pts_list.append(new_pts_b)
+            add_idx_list.append(idx)
+
+            # Hard選択集合を近似するための閾値
+            # 末尾の選択点の確率を detach して使う
+            thr_b = add_prob[b, idx[-1]].detach()
+            thr_list.append(thr_b)
+
+            hard_ratio_list.append(
+                torch.tensor(float(idx.numel()) / float(N), device=pts.device, dtype=add_prob.dtype)
+            )
+
+        new_pts_hard = torch.stack(new_pts_list, dim=0)              # (B,3,K)
+        add_idx = torch.stack(add_idx_list, dim=0)                   # (B,K)
+        pts_add_hard = torch.cat([pts, new_pts_hard], dim=2)         # (B,3,N+K)
+
+        # ---------------------------------------------------
+        # Soft側: Hard選択集合を近似する連続重み soft_sel を作る
+        #   - 閾値は Hard 側から detach して取得
+        #   - add_prob に対してのみ勾配を流す
+        # ---------------------------------------------------
+        thr = torch.stack(thr_list, dim=0).unsqueeze(1)              # (B,1)
+        hard_ratio = torch.stack(hard_ratio_list, dim=0)             # (B,)
 
         tau_match = float(getattr(self.cfgs, "add_soft_match_tau", 0.05))
         tau_match = max(tau_match, 1e-6)
 
-        # まずは生の soft mask を作る
-        soft_mask_raw = torch.sigmoid((add_prob - thr) / tau_match)        # (B,N)
+        # Hard集合の指示関数 1[p >= thr] を sigmoid で近似
+        soft_sel = torch.sigmoid((add_prob - thr) / tau_match)       # (B,N)
 
-        # Hard と整合した重みを作るための scale 済み soft mask
-        soft_mean_det = soft_mask_raw.mean(dim=1, keepdim=True).detach()   # (B,1)
-        scale = hard_ratio.unsqueeze(1) / (soft_mean_det + 1e-12)          # (B,1)
-        soft_mask = (soft_mask_raw * scale).clamp(0.0, 1.0)                # (B,N)
+        # Soft重みの総量を Hard の実追加率に合わせる
+        soft_mean_det = soft_sel.mean(dim=1, keepdim=True).detach()  # (B,1)
+        scale = hard_ratio.unsqueeze(1) / (soft_mean_det + 1e-12)    # (B,1)
+        soft_sel = (soft_sel * scale).clamp(0.0, 1.0)                # (B,N)
 
-        """=== STE mask ==="""
-        mask_st = hard_mask - soft_mask.detach() + soft_mask               # (B,N)
-        add_w = mask_st.unsqueeze(1)                                       # (B,1,N)
+        add_w = soft_sel.unsqueeze(1)                                # (B,1,N)
 
-        pts_add_soft = pts
-    
-        """Calculate Loss"""
-        L_fit = self._compute_L_fit(pts, new_pts_all, add_prob=add_w)
-        L_rep = self._compute_L_rep_weighted(new_pts_all, add_w)
+        # -----------------------------
+        # Soft損失: Hard近似重みで計算
+        # -----------------------------
+        L_fit = self._compute_L_fit(pts, new_pts_soft, add_prob=add_w)
+        L_rep = self._compute_L_rep_weighted(new_pts_soft, add_w)
 
-        mean_add_ratio_soft = soft_mask.mean(dim=1)                        # (B,)
-        target_ratio = torch.full_like(hard_ratio, float(self.target_add_ratio))   # (B,)
-        mean_add_ratio_pred = soft_mask_raw.mean(dim=1)                            # (B,)
-
-        delta_cnt = (mean_add_ratio_pred - target_ratio).abs()
-        L_cnt = torch.log1p(128 * delta_cnt).mean()
+        # Softの総量がHardの実追加率に近づくようにする
+        mean_add_ratio_soft = soft_sel.mean(dim=1)                   # (B,)
+        delta = (mean_add_ratio_soft - hard_ratio.detach()).abs()
+        L_cnt = torch.log1p(128 * delta).mean()
 
         loss_add = (
             self.add_cnt * L_cnt
@@ -329,4 +369,4 @@ class AddModule(nn.Module):
                 f"AddRatio(hard):{hard_ratio.mean().item():.6f}"
             )
 
-        return pts_add_hard, new_pts_all, new_pts_hard, add_w, add_idx, loss_add
+        return pts_add_soft, pts_add_hard, new_pts_soft, new_pts_hard, add_w, add_idx, loss_add
