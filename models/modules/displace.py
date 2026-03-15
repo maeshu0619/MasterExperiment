@@ -63,8 +63,8 @@ class DisplacementModule(nn.Module):
         self.last_delta = None
         self.last_mag = None
 
-    def _predict(self, pts, F_prime, d_prime, s_prime, o_prime):
-        c = torch.cat([pts, F_prime, d_prime, s_prime, o_prime], dim=1)
+    def _predict(self, pts, F, D, S, O):
+        c = torch.cat([pts, F, D, S, O], dim=1)
 
         net = self.conv_in(c)
         for block in self.blocks:
@@ -106,7 +106,7 @@ class DisplacementModule(nn.Module):
         scale = torch.clamp(max_norm / norm, max=1.0)
         return delta * scale
 
-    def forward(self, pts, F_prime, d_prime, s_prime, o_prime):
+    def forward(self, pts, F, D, S, O):
         pts_dis = pts
         max_disp = float(getattr(self.cfgs, "max_disp_offset", 0.01))
 
@@ -118,7 +118,7 @@ class DisplacementModule(nn.Module):
         last_soft_mask_raw = None
 
         for step in range(max(self.num_steps, 1)):
-            dir_raw, mag01, gate01 = self._predict(pts_dis, F_prime, d_prime, s_prime, o_prime)
+            dir_raw, mag01, gate01 = self._predict(pts_dis, F, D, S, O)
 
             # 方向を単位ベクトル化
             direction = self._normalize_dir(dir_raw)
