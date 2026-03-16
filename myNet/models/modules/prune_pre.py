@@ -132,7 +132,7 @@ class PruningModule(nn.Module):
         ratio_raw = torch.sigmoid(ratio_logit) # (B,) # 割合スコアを0~1に変換する
         keep_ratio_pred = self.ratio_min + (self.ratio_max - self.ratio_min) * ratio_raw # (B,) # 予測割合を最小、最大値のレンジに収める
 
-        K_keep_each = torch.round(keep_ratio_pred * N).long() # (B,) # 何点残すのかを整数変換
+        K_keep_each = torch.round(keep_ratio_pred.detach() * N).long() # (B,) # 何点残すのかを整数変換
         K_keep_each = torch.clamp(K_keep_each, min=1, max=N) # 残す点数を1～N範囲に制限
         K_keep = int(K_keep_each.max().item()) # バッチ内で最大点数を1つ取り出す
 
@@ -151,6 +151,25 @@ class PruningModule(nn.Module):
         pts_hard = pts_hard * valid_topk_mask.unsqueeze(1).float() # 無効な位置を0にする
 
         # ==================== Soft ====================
+        tau_match = max(self.tau_match, 1e-6)
+
+        # keep_ratio_pred に一致する soft keep 率になるような閾値を連続的に探す
+        lo = keep_prob.min(dim=1, keepdim=True).values - 1.0
+        hi = keep_prob.max(dim=1, keepdim=True).values + 1.0
+        target_ratio = keep_ratio_pred.unsqueeze(1)  # (B,1)
+
+        for _ in range(16):
+            mid = 0.5 * (lo + hi)
+            soft_tmp = torch.sigmoid((keep_prob - mid) / tau_match)
+            mean_tmp = soft_tmp.mean(dim=1, keepdim=True)
+
+            go_up = mean_tmp > target_ratio
+            lo = torch.where(go_up, mid, lo)
+            hi = torch.where(go_up, hi, mid)
+
+        thr_soft = 0.5 * (lo + hi)
+        soft_mask = torch.sigmoid((keep_prob - thr_soft) / tau_match)
+        """
         tau_match = max(self.tau_match, 1e-6) # SoftMaskの鋭さを決める温度を基に、極端に小さすぎないようにする
         # thr_soft = torch.gather(keep_prob, 1, keep_idx_hard[:, -1:].detach()) # (B,1) # Hard境界の初期値
         last_rank = (K_keep_each - 1).clamp(min=0) # 各サンプルで最後に残す点の順位を作成
@@ -163,20 +182,13 @@ class PruningModule(nn.Module):
             thr_soft = thr_soft + (mean_tmp - hard_ratio.unsqueeze(1)).detach() # HardMaskに合うようにずらす
 
         soft_mask = torch.sigmoid((keep_prob - thr_soft) / tau_match) # (B,N) # 最終的なSoftMaskを作成
+        """
         
-        # thr = torch.gather(keep_prob, 1, keep_idx_hard[:, -1:].detach()) # (B,1)
-        # tau_match = max(self.tau_match, 1e-6)
-        # soft_mask_raw = torch.sigmoid((keep_prob - thr) / tau_match)                    # (B,N)
-
-        # soft_mean_det = soft_mask_raw.mean(dim=1, keepdim=True).detach()                # (B,1)
-        # scale = hard_ratio.unsqueeze(1) / (soft_mean_det + 1e-12)                       # (B,1)
-        # soft_mask = (soft_mask_raw * scale).clamp(0.0, 1.0)                             # (B,N)
-
         """==================== STE ===================="""
         mask_st = hard_mask - soft_mask.detach() + soft_mask # (B,N) # forwardとbackwardで分け、勾配が流れるようにする
         keep_w_full = mask_st.unsqueeze(1) # (B,1,N) # チャネル次元を1つ足して拡張
         keep_w_hard = torch.gather(keep_w_full, 2, keep_idx_hard.unsqueeze(1)) # Hardに選ばれた点に対する重みだけを抜き出す   
-        keep_w_hard = keep_w_hard * valid_topk_mask.unsqueeze(1).float()                                                                        # (B,1,K_keep)
+        keep_w_hard = keep_w_hard * valid_topk_mask.unsqueeze(1).float() # (B,1,K_keep) # 無効位置の重みを0にする
 
         """==================== Calculate Loss ===================="""
         L_cnt = 0.0

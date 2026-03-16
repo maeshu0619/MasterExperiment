@@ -4,13 +4,6 @@ import torch.nn.functional as F
 
 
 class AddModule(nn.Module):
-    """
-    追加領域 + 追加点数 + 追加ベクトルを同時に学習するAdd
-    - TopKを使わない（非微分を排除）
-    - Binary Concrete で追加マスクを生成
-    - 返り値に loss_add を含める
-    """
-
     def __init__(self, cfgs, writer):
         super().__init__()
         self.cfgs = cfgs
@@ -35,6 +28,7 @@ class AddModule(nn.Module):
         self.max_ratio = float(getattr(cfgs, "max_add_ratio", 0.05)) # max追加点数（安全上限）
         self.max_offset = float(getattr(self.cfgs, "max_offset", 1.0)) # 追加点の移動距離の最大量
         self.tau_match = float(getattr(self.cfgs, "add_soft_match_tau", 0.05)) # Soft化の温度パラメータ
+        self.sharpness = float(getattr(self.cfgs, "add_soft_sharpness", 6.0)) # 係数 sharpness は調整用
 
         # 共有MLP
         self.mlp = nn.Sequential(
@@ -47,21 +41,21 @@ class AddModule(nn.Module):
             nn.Conv1d(hidden_dim, hidden_dim, 1),
             nn.ReLU(inplace=True),
         )
-        self.mlp_logit = nn.Sequential(
+        self.mlp_logit = nn.Sequential( # 追加確率（logit） # どこに
             nn.Conv1d(hidden_dim, hidden_dim, 1),
             nn.ReLU(inplace=True),
             nn.Conv1d(hidden_dim, 1, 1),
-        ) # 追加確率（logit） # どこに
-        self.mlp_dir = nn.Sequential(
+        )
+        self.mlp_dir = nn.Sequential( # 方向（未正規化） # どっちに
             nn.Conv1d(hidden_dim, hidden_dim, 1),
             nn.ReLU(inplace=True),
             nn.Conv1d(hidden_dim, 3, 1),
-        ) # 方向（未正規化） # どっちに
-        self.mlp_mag = nn.Sequential(
+        )
+        self.mlp_mag = nn.Sequential( # 距離（スカラー） # どれくらい
             nn.Conv1d(hidden_dim, hidden_dim, 1),
             nn.ReLU(inplace=True),
             nn.Conv1d(hidden_dim, 1, 1),
-        ) # 距離（スカラー） # どれくらい
+        )
 
     def _sample_binary_concrete(self, logit: torch.Tensor):
         """
@@ -80,18 +74,6 @@ class AddModule(nn.Module):
         mask = y_hard.detach() - y.detach() + y # STEの算出
         prob = torch.sigmoid(logit)
         return mask, prob
-
-    # def _compute_L_fit(self, add_prob: torch.Tensor, offset: torch.Tensor):
-    #     """
-    #     L_fit: 追加点が元点から離れすぎない（= offsetが大きすぎない）
-    #     add_prob: (B,N)
-    #     offset  : (B,3,N)
-    #     """
-    #     off_norm = offset.norm(dim=1)  # (B,N)
-    #     # conv_radiusで正規化して二乗、0に寄せる
-    #     val = (off_norm / (self.conv_radius + 1e-8)) ** 2
-    #     # add_probで重み付け（追加しない点のoffsetには関心がない）
-    #     return (add_prob * val).mean()
 
     def _compute_L_fit(self, pts: torch.Tensor, new_pts: torch.Tensor, add_prob: torch.Tensor = None):
         B, _, N = pts.shape
@@ -175,43 +157,7 @@ class AddModule(nn.Module):
 
         return loss_accum / float(B)
 
-    def _compute_L_rep(self, new_pts: torch.Tensor):
-        """
-        L_rep: 追加点同士の過密を抑制（近すぎたら罰）
-        new_pts: (B,3,K)
-        """
-        B, _, K = new_pts.shape
-        if K <= 1:
-            return new_pts.new_tensor(0.0)
-
-        # O(K^2)回避のためサブサンプル
-        M = min(K, self.rep_max_points)
-        if M < K:
-            idx = torch.randperm(K, device=new_pts.device)[:M]
-            p = new_pts[:, :, idx]  # (B,3,M)
-        else:
-            p = new_pts  # (B,3,M)
-
-        # (B,M,3)
-        p = p.permute(0, 2, 1).contiguous()
-
-        # 正規化（RepKPU同様 conv_radius で）
-        p = p / (self.conv_radius + 1e-8)
-
-        # 距離行列 (B,M,M)
-        dist = torch.cdist(p, p)
-
-        # 対角を無視
-        eye = torch.eye(dist.shape[1], device=dist.device).unsqueeze(0)
-        dist = dist + eye * 1e6
-
-        # 閾値より近い分だけペナルティ（RepKPUの clamp_max(dist - extent, max=0)^2 と同型）
-        rep = torch.clamp_max(dist - self.repulse_extent, max=0.0) ** 2
-
-        # 平均
-        return rep.mean()
-
-    def _compute_L_rep_weighted(self, new_pts: torch.Tensor, add_w: torch.Tensor):
+    def _compute_L_rep(self, new_pts: torch.Tensor, add_w: torch.Tensor):
         B, _, N = new_pts.shape
         if N <= 1:
             return new_pts.new_tensor(0.0)
@@ -245,46 +191,53 @@ class AddModule(nn.Module):
 
         return rep.sum() / (denom + 1e-12)
 
-    # def _compute_L_rep_weighted(self, new_pts: torch.Tensor, add_w: torch.Tensor):
-    #     """
-    #     L_rep: 追加候補点同士の過密を抑制
-    #     new_pts: (B,3,N)
-    #     add_w  : (B,1,N) または (B,N)
-    #     """
-    #     B, _, N = new_pts.shape
-    #     if N <= 1:
-    #         return new_pts.new_tensor(0.0)
+    def evaluate_mask_similarity(self, hard_mask, soft_mask, add_prob, k=None):
+        B, N = hard_mask.shape
+        if k is None:
+            k = int(hard_mask.sum(dim=1).mean().item())
+        results = {}
 
-    #     if add_w.dim() == 3:
-    #         add_w = add_w.squeeze(1)  # (B,N)
+        # 1 Top-K一致率
+        soft_topk = torch.topk(soft_mask, k, dim=1).indices
+        hard_topk = torch.topk(hard_mask, k, dim=1).indices
+        match = 0
+        total = B * k
+        for b in range(B):
+            match += len(set(soft_topk[b].tolist()) & set(hard_topk[b].tolist()))
+        results["topk_match_ratio"] = match / total
 
-    #     M = min(N, self.rep_max_points)
-    #     if M < N:
-    #         idx = torch.randperm(N, device=new_pts.device)[:M]
-    #         p = new_pts[:, :, idx]          # (B,3,M)
-    #         w = add_w[:, idx]               # (B,M)
-    #     else:
-    #         p = new_pts
-    #         w = add_w
+        # 2 Jaccard係数
+        jaccard_list = []
+        for b in range(B):
+            hard_set = set(hard_topk[b].tolist())
+            soft_set = set(soft_topk[b].tolist())
+            inter = len(hard_set & soft_set)
+            union = len(hard_set | soft_set) + 1e-8
+            jaccard_list.append(inter / union)
+        results["jaccard"] = sum(jaccard_list) / len(jaccard_list)
 
-    #     p = p.permute(0, 2, 1).contiguous()  # (B,M,3)
-    #     p = p / (self.conv_radius + 1e-8)
+        # 3 Spearman順位相関
+        corr_list = []
+        for b in range(B):
+            rank1 = torch.argsort(torch.argsort(add_prob[b]))
+            rank2 = torch.argsort(torch.argsort(soft_mask[b]))
+            r = torch.corrcoef(
+                torch.stack([rank1.float(), rank2.float()])
+            )[0,1]
+            corr_list.append(r.item())
+        results["rank_corr"] = sum(corr_list) / len(corr_list)
 
-    #     dist = torch.cdist(p, p)  # (B,M,M)
+        # 4 追加率一致
+        hard_ratio = hard_mask.mean().item()
+        soft_ratio = soft_mask.mean().item()
+        results["hard_ratio"] = hard_ratio
+        results["soft_ratio"] = soft_ratio
+        results["ratio_diff"] = abs(hard_ratio-soft_ratio)
 
-    #     eye = torch.eye(dist.shape[1], device=dist.device).unsqueeze(0)
-    #     dist = dist + eye * 1e6
-
-    #     rep = torch.clamp_max(dist - self.repulse_extent, max=0.0) ** 2  # (B,M,M)
-
-    #     # 点対ごとの重み
-    #     ww = w.unsqueeze(2) * w.unsqueeze(1)  # (B,M,M)
-    #     rep = rep * ww
-
-    #     return rep.sum() / (ww.sum() + 1e-12)
+        return results
 
     def forward(self, pts, Fl, D, S, O):
-        """セットアップ"""
+        """==================== SetUp ===================="""
         B, _, N = pts.shape
 
         # 追加点数を固定的に決める
@@ -298,7 +251,7 @@ class AddModule(nn.Module):
 
         # 各点の追加スコア
         add_logit = self.mlp_logit(h).squeeze(1) # (B,N) # 各点に対して1つのスコア # 確率に変換する前の生のスコア
-        add_mask, add_prob = self._sample_binary_concrete(add_logit) # (B,N), (B,N) # SoftなSTEマスク、連続的な追加確率
+        _, add_prob = self._sample_binary_concrete(add_logit) # (B,N), (B,N) # SoftなSTEマスク、連続的な追加確率
 
         """点を追加するための方向ベクトルを計算"""
         dir_raw = torch.tanh(self.mlp_dir(h)) # (B,3,N) # 各点に対して3次元ベクトルを計算
@@ -309,7 +262,7 @@ class AddModule(nn.Module):
         offset = dir_vec * (mag.unsqueeze(1) * self.max_offset) # (B,3,N) # 方向と大きさを掛けて最終的なオフセットを算出
         new_pts_all = pts + offset # 全追加候補点
         
-        """========== Hard =========="""
+        """==================== Hard ===================="""
         add_idx = torch.topk(add_prob, k=K, dim=1, largest=True).indices # (B,K) # 追加確率add_probが高い順にK点の点インデックスを取る
         add_idx = torch.sort(add_idx, dim=1).values # (B,K) # 昇順に並べ替え
 
@@ -321,30 +274,45 @@ class AddModule(nn.Module):
         new_pts_hard = torch.gather(new_pts_all, 2, idx_expand) # (B,3,K) # new_pts_allの中からadd_idxの分だけ取り出す
         pts_add_hard = torch.cat([pts, new_pts_hard], dim=2) # 入力点群と追加点群の合成
     
-        """========== Soft =========="""
-        thr = torch.gather(add_prob, 1, add_idx[:, -1:].detach()) # (B,1) # add_idxの中で最も低い確率を閾値とする
-        self.tau_match = max(self.tau_match, 1e-6) # 0除算や極端な値を避けるための下限
+        """==================== Soft ===================="""
+        tau_match = max(self.tau_match, 1e-6)
+        target_ratio = hard_ratio.unsqueeze(1)  # (B,1)
+        thr_soft = add_prob.mean(dim=1, keepdim=True)  # 初期閾値
 
-        soft_mask_raw = torch.sigmoid((add_prob - thr) / self.tau_match) # (B,N) # 閾値を境にTopKに近い滑らかなSoftMaskを作る
-        soft_mean_det = soft_mask_raw.mean(dim=1, keepdim=True).detach() # (B,1) # SoftMaskの平均追加率を計算し、勾配を切った値として保持
-        scale = hard_ratio.unsqueeze(1) / (soft_mean_det + 1e-12) # (B,1) # SoftMaskの平均がHardMaskの平均と合うようにスケール係数を作る
-        soft_mask = (soft_mask_raw * scale).clamp(0.0, 1.0) # (B,N) # SoftMaskをスケーリングして、0-1に収める
+        for _ in range(8):
+            soft_tmp = torch.sigmoid((add_prob - thr_soft) / tau_match)  # (B,N)
+            mean_tmp = soft_tmp.mean(dim=1, keepdim=True)  # (B,1)
 
-        """========== STE mask =========="""
+            dmean_dthr = -(soft_tmp * (1.0 - soft_tmp) / tau_match).mean(dim=1, keepdim=True)
+            dmean_dthr = torch.where(
+                dmean_dthr.abs() < 1e-8,
+                torch.full_like(dmean_dthr, -1e-8),
+                dmean_dthr
+            )
+
+            thr_soft = thr_soft - (mean_tmp - target_ratio) / dmean_dthr
+
+        soft_mask = torch.sigmoid((add_prob - thr_soft) / tau_match)
+        """
+        topk_logit = torch.gather(add_logit, 1, add_idx) # (B,K) # Hardで選ばれた点のlogitを参照
+        center = topk_logit.mean(dim=1, keepdim=True) # (B,1) # add_idx の代表値を作る
+        spread = topk_logit.std(dim=1, keepdim=True).clamp_min(1e-2) # (B,1)
+        soft_mask = torch.sigmoid(self.sharpness * (add_logit - center) / spread) # (B,N) # center より大きいほど高く、離れるほど低くする
+        """
+        
+        """==================== STE mask ===================="""
         mask_st = hard_mask - soft_mask.detach() + soft_mask # (B,N) # forwardはHardMask、backwardはSoftMaskになるSTEマスク
         add_w = mask_st.unsqueeze(1) # (B,1,N) #下流の計算のために(B,1,N)に形を整える
     
-        """========== Calculate Loss =========="""
-        L_fit = self._compute_L_fit(pts, new_pts_all, add_w)
-        L_rep = self._compute_L_rep_weighted(new_pts_all, add_w)
-        # L_fit = self._compute_L_fit(pts, new_pts_hard)
-        # L_rep = self._compute_L_rep(new_pts_hard)
+        """==================== Calculate Loss ===================="""
+        add_w_hard = torch.gather(add_w, 2, add_idx.unsqueeze(1)) # (B,1,K) # Hardで選ばれた点の重みを取り出す
+        L_fit = self._compute_L_fit(pts, new_pts_hard, add_w_hard)
+        L_rep = self._compute_L_rep(new_pts_hard, add_w_hard)
 
         mean_add_ratio_soft = soft_mask.mean(dim=1) # (B,) # スケール後SoftMaskの平均追加率
-        mean_add_ratio_pred = soft_mask_raw.mean(dim=1) # (B,) # スケール前の生SoftMaskの平均追加率
         target_ratio = torch.full_like(hard_ratio, float(self.target_add_ratio)) # (B,) # 目標追加率
 
-        delta_cnt = (mean_add_ratio_pred - target_ratio).abs() # 目標追加率と実際の追加率のずれ
+        delta_cnt = (mean_add_ratio_soft - target_ratio).abs() # 目標追加率と実際の追加率のずれ
         L_cnt = torch.log1p(128 * delta_cnt).mean() # 追加率のずれに対する損失（小さなずれは緩やか、大きなずれは急激にペナルティ）
 
         loss_add = (self.add_cnt * L_cnt + self.add_fit * L_fit + self.add_rep * L_rep) # 実際の追加損失の計算
@@ -357,4 +325,8 @@ class AddModule(nn.Module):
                 f"AddRatio(hard):{hard_ratio.mean().item():.6f}"
             )
 
-        return pts_add_hard, new_pts_all, new_pts_hard, add_w, add_idx, loss_add, L_cnt, L_fit, L_rep
+        print(f"SoftMask->max:{soft_mask.max().item():.4f}, mean:{soft_mask.mean().item():.4f}, min:{soft_mask.min().item():.4f}")
+        print(f"HardMask->max:{hard_mask.max().item():.4f}, mean:{hard_mask.mean().item():.4f}, min:{hard_mask.min().item():.4f}")
+        print(self.evaluate_mask_similarity(hard_mask, soft_mask, add_prob, k=K))
+
+        return pts_add_hard, new_pts_hard, add_w, add_idx, loss_add, L_cnt, L_fit, L_rep

@@ -262,6 +262,8 @@ class AddModule(nn.Module):
         offset = dir_vec * (mag.unsqueeze(1) * self.max_offset) # (B,3,N) # 方向と大きさを掛けて最終的なオフセットを算出
         new_pts_all = pts + offset # 全追加候補点
         
+        add_prob = torch.sigmoid(add_logit) # (B,N) # sigmoidに通して、各点の残存確率を(0,1)に変換
+        
         """==================== Hard ===================="""
         add_idx = torch.topk(add_prob, k=K, dim=1, largest=True).indices # (B,K) # 追加確率add_probが高い順にK点の点インデックスを取る
         add_idx = torch.sort(add_idx, dim=1).values # (B,K) # 昇順に並べ替え
@@ -274,12 +276,29 @@ class AddModule(nn.Module):
         new_pts_hard = torch.gather(new_pts_all, 2, idx_expand) # (B,3,K) # new_pts_allの中からadd_idxの分だけ取り出す
         pts_add_hard = torch.cat([pts, new_pts_hard], dim=2) # 入力点群と追加点群の合成
     
-        """==================== Soft ===================="""
-        topk_logit = torch.gather(add_logit, 1, add_idx) # (B,K) # Hardで選ばれた点のlogitを参照
-        center = topk_logit.mean(dim=1, keepdim=True) # (B,1) # add_idx の代表値を作る
-        spread = topk_logit.std(dim=1, keepdim=True).clamp_min(1e-2) # (B,1)
-        soft_mask = torch.sigmoid(self.sharpness * (add_logit - center) / spread) # (B,N) # center より大きいほど高く、離れるほど低くする
+        """==================== Soft ====================""" 
+        tau_match = max(self.tau_match, 1e-6)
+        target_ratio = hard_ratio.unsqueeze(1)  # (B,1)
 
+        # 初期閾値は logit の平均でよい
+        thr_soft = add_logit.mean(dim=1, keepdim=True)  # (B,1)
+
+        # logit空間で、soft_mask の平均が target_ratio に一致する閾値を解く
+        for _ in range(8):
+            soft_tmp = torch.sigmoid((add_logit - thr_soft) / tau_match) # (B,N)
+            mean_tmp = soft_tmp.mean(dim=1, keepdim=True) # (B,1)
+
+            dmean_dthr = -(soft_tmp * (1.0 - soft_tmp) / tau_match).mean(dim=1, keepdim=True)
+            dmean_dthr = torch.where(
+                dmean_dthr.abs() < 1e-8,
+                torch.full_like(dmean_dthr, -1e-8),
+                dmean_dthr
+            )
+
+            thr_soft = thr_soft - (mean_tmp - target_ratio) / dmean_dthr
+
+        soft_mask = torch.sigmoid((add_logit - thr_soft) / tau_match)
+        
         """==================== STE mask ===================="""
         mask_st = hard_mask - soft_mask.detach() + soft_mask # (B,N) # forwardはHardMask、backwardはSoftMaskになるSTEマスク
         add_w = mask_st.unsqueeze(1) # (B,1,N) #下流の計算のために(B,1,N)に形を整える
@@ -305,8 +324,8 @@ class AddModule(nn.Module):
                 f"AddRatio(hard):{hard_ratio.mean().item():.6f}"
             )
 
-        print(f"SoftMask->max:{soft_mask.max().item():.4f}, mean:{soft_mask.mean().item():.4f}, min:{soft_mask.min().item():.4f}")
-        print(f"HardMask->max:{hard_mask.max().item():.4f}, mean:{hard_mask.mean().item():.4f}, min:{hard_mask.min().item():.4f}")
-        print(self.evaluate_mask_similarity(hard_mask, soft_mask, add_prob, k=K))
+        # print(f"SoftMask->max:{soft_mask.max().item():.4f}, mean:{soft_mask.mean().item():.4f}, min:{soft_mask.min().item():.4f}")
+        # print(f"HardMask->max:{hard_mask.max().item():.4f}, mean:{hard_mask.mean().item():.4f}, min:{hard_mask.min().item():.4f}")
+        # print(self.evaluate_mask_similarity(hard_mask, soft_mask, add_prob, k=K))
 
         return pts_add_hard, new_pts_hard, add_w, add_idx, loss_add, L_cnt, L_fit, L_rep
