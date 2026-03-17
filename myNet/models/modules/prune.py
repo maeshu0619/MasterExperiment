@@ -2,6 +2,16 @@ import torch
 import torch.nn as nn
 from .resblock import ResnetBlockConv1d
 
+import os
+import sys
+
+ROOT_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '..')
+)
+sys.path.append(ROOT_DIR)
+
+from utils.utils_unoutdet import *
+
 
 class PruningModule(nn.Module):
     """
@@ -12,7 +22,7 @@ class PruningModule(nn.Module):
         self.cfgs = cfgs
         self.writer = writer
 
-        in_dim = cfgs.fp_mlp_channels[-1] + 2 + cfgs.octree_ctx_dim
+        in_dim = cfgs.fp_mlp_channels[-1] + 3 + cfgs.octree_ctx_dim
         hidden = cfgs.prune_hidden_dim
 
         num_blocks = getattr(cfgs, "prune_num_blocks", 3)
@@ -35,7 +45,7 @@ class PruningModule(nn.Module):
         self.act_out_keep = nn.ReLU()
         self.conv_out_keep = nn.Conv1d(hidden, 1, 1)
 
-        self.bn_out_ratio = nn.BatchNorm1d(hidden) # 残す割合スコアの出力部分
+        self.bn_out_ratio = nn.BatchNorm1d(hidden) # 残す割合スコアの出力層部分
         self.act_out_ratio = nn.ReLU()
         self.conv_out_ratio = nn.Conv1d(hidden, 1, 1)
 
@@ -113,10 +123,10 @@ class PruningModule(nn.Module):
 
         return results
     
-    def forward(self, pts, Ff, D, S, O):
+    def forward(self, pts, Ff, Den, Str, Oct, Out, OutLabel):
         """==================== SetUp ===================="""
         B, _, N = pts.shape # バッチサイズ、チャネル数、点数
-        x = torch.cat([Ff, D, S, O], dim=1) # 入力をチャネル方向に統合
+        x = torch.cat([Ff, Den, Str, Oct, Out], dim=1) # 入力をチャネル方向に統合
 
         h = self.conv_in(x) # 入力層で隠れ表現に変換
         for block in self.blocks: # ResBlockに通す
@@ -160,7 +170,7 @@ class PruningModule(nn.Module):
             soft_tmp = torch.sigmoid((keep_prob - thr_soft) / tau_match) # (B,N)
             mean_tmp = soft_tmp.mean(dim=1, keepdim=True) # (B,1)
 
-            # d/dthr sigmoid((x-thr)/tau) = -(1/tau) * s * (1-s)
+            # Den/dthr sigmoid((x-thr)/tau) = -(1/tau) * Str * (1-Str)
             dmean_dthr = -(soft_tmp * (1.0 - soft_tmp) / tau_match).mean(dim=1, keepdim=True) # (B,1)
             dmean_dthr = torch.where( # ゼロ割れ防止
                 dmean_dthr.abs() < 1e-8,
@@ -202,7 +212,19 @@ class PruningModule(nn.Module):
         delta_cnt = (mean_keep_ratio - target_ratio).abs() # 予測Keep率と目標Keep率の差
         L_cnt = torch.log1p(128 * delta_cnt).mean() # delta_cntに近いほど小さく数値が動く
         """
-        score = D.squeeze(1)  # (B,N) # 密度スコアを（B,N）に整形
+        target_keep = 1.0 - OutLabel.squeeze(1)   # [B,N], 1=inlier(残す), 0=outlier(消す)
+        target_keep = target_keep.detach()
+
+        # 1) UnOutDetのCrossEntropy相当
+        L_out_bce = torch.nn.functional.binary_cross_entropy_with_logits(prun_logit, target_keep)
+
+        # 2) UnOutDetのLovasz相当（binary版）
+        L_out_lovasz = lovasz_hinge(prun_logit, target_keep)
+        L_out = L_out_bce + L_out_lovasz
+        
+        """
+        # L_out計算
+        score = Den.squeeze(1)  # (B,N) # 密度スコアを（B,N）に整形
         eps = 1e-6
         r = (1.0 / (score + eps)) if self.high_is_inlier else score # スコアが高いほどinlierとする
         r = r / (r.mean(dim=1, keepdim=True) + eps) # スコアを正規化
@@ -210,6 +232,8 @@ class PruningModule(nn.Module):
         w_inlier = w_inlier.detach() # この損失からD側へ勾配が流れないようにする # 密度スコアをこの損失で学習しないように
 
         L_out = torch.nn.functional.mse_loss(mask_st, w_inlier) # 外れ点を消しているか否かの損失計算
+        """
+
         loss_prun = L_out # 削除損失計算
         # loss_prun = self.prun_cnt * L_cnt + self.prun_out * L_out # 削除損失計算
 

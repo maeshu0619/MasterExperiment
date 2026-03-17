@@ -311,8 +311,9 @@ class AddModule(nn.Module):
         mean_add_ratio_soft = soft_mask.mean(dim=1) # (B,) # スケール後SoftMaskの平均追加率
         target_ratio = torch.full_like(hard_ratio, float(self.target_add_ratio)) # (B,) # 目標追加率
 
-        delta_cnt = (mean_add_ratio_soft - target_ratio).abs() # 目標追加率と実際の追加率のずれ
-        L_cnt = torch.log1p(128 * delta_cnt).mean() # 追加率のずれに対する損失（小さなずれは緩やか、大きなずれは急激にペナルティ）
+        L_cnt = 0.0
+        # delta_cnt = (mean_add_ratio_soft - target_ratio).abs() # 目標追加率と実際の追加率のずれ
+        # L_cnt = torch.log1p(128 * delta_cnt).mean() # 追加率のずれに対する損失（小さなずれは緩やか、大きなずれは急激にペナルティ）
 
         loss_add = (self.add_cnt * L_cnt + self.add_fit * L_fit + self.add_rep * L_rep) # 実際の追加損失の計算
 
