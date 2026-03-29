@@ -2,6 +2,16 @@ import torch
 import torch.nn as nn
 from .resblock import ResnetBlockConv1d
 
+import os
+import sys
+
+ROOT_DIR = os.path.abspath(
+    os.path.join(os.path.dirname(__file__), '..')
+)
+sys.path.append(ROOT_DIR)
+
+from utils.utils_unoutdet import *
+
 
 class PruningModule(nn.Module):
     """
@@ -12,8 +22,10 @@ class PruningModule(nn.Module):
         self.cfgs = cfgs
         self.writer = writer
 
-        in_dim = cfgs.fp_mlp_channels[-1] + 2 + cfgs.octree_ctx_dim
+        in_dim = cfgs.fp_mlp_channels[-1] + 3 + cfgs.octree_ctx_dim
         hidden = cfgs.prune_hidden_dim
+
+        self.debug_tensors = {}
 
         num_blocks = getattr(cfgs, "prune_num_blocks", 3)
         self.tau = getattr(cfgs, "prune_tau", 0.5)
@@ -35,7 +47,7 @@ class PruningModule(nn.Module):
         self.act_out_keep = nn.ReLU()
         self.conv_out_keep = nn.Conv1d(hidden, 1, 1)
 
-        self.bn_out_ratio = nn.BatchNorm1d(hidden) # 残す割合スコアの出力部分
+        self.bn_out_ratio = nn.BatchNorm1d(hidden) # 残す割合スコアの出力層部分
         self.act_out_ratio = nn.ReLU()
         self.conv_out_ratio = nn.Conv1d(hidden, 1, 1)
 
@@ -113,10 +125,10 @@ class PruningModule(nn.Module):
 
         return results
     
-    def forward(self, pts, Ff, D, S, O):
+    def forward(self, pts, Ff, Den, Str, Oct, Out, OutLabel):
         """==================== SetUp ===================="""
         B, _, N = pts.shape # バッチサイズ、チャネル数、点数
-        x = torch.cat([Ff, D, S, O], dim=1) # 入力をチャネル方向に統合
+        x = torch.cat([Ff, Den, Str, Oct, Out], dim=1) # 入力をチャネル方向に統合
 
         h = self.conv_in(x) # 入力層で隠れ表現に変換
         for block in self.blocks: # ResBlockに通す
@@ -152,23 +164,25 @@ class PruningModule(nn.Module):
 
         # ==================== Soft ====================
         tau_match = max(self.tau_match, 1e-6)
+        target_ratio = keep_ratio_pred.unsqueeze(1) # (B,1)
+        thr_soft = keep_prob.mean(dim=1, keepdim=True) # 連続的な初期値
 
-        # keep_ratio_pred に一致する soft keep 率になるような閾値を連続的に探す
-        lo = keep_prob.min(dim=1, keepdim=True).values - 1.0
-        hi = keep_prob.max(dim=1, keepdim=True).values + 1.0
-        target_ratio = keep_ratio_pred.unsqueeze(1)  # (B,1)
+        # Newton法風に、soft_mask の平均が target_ratio に近づく閾値を連続更新する
+        for _ in range(8):
+            soft_tmp = torch.sigmoid((keep_prob - thr_soft) / tau_match) # (B,N)
+            mean_tmp = soft_tmp.mean(dim=1, keepdim=True) # (B,1)
 
-        for _ in range(16):
-            mid = 0.5 * (lo + hi)
-            soft_tmp = torch.sigmoid((keep_prob - mid) / tau_match)
-            mean_tmp = soft_tmp.mean(dim=1, keepdim=True)
+            # Den/dthr sigmoid((x-thr)/tau) = -(1/tau) * Str * (1-Str)
+            dmean_dthr = -(soft_tmp * (1.0 - soft_tmp) / tau_match).mean(dim=1, keepdim=True) # (B,1)
+            dmean_dthr = torch.where( # ゼロ割れ防止
+                dmean_dthr.abs() < 1e-8,
+                torch.full_like(dmean_dthr, -1e-8),
+                dmean_dthr
+            )
 
-            go_up = mean_tmp > target_ratio
-            lo = torch.where(go_up, mid, lo)
-            hi = torch.where(go_up, hi, mid)
-
-        thr_soft = 0.5 * (lo + hi)
-        soft_mask = torch.sigmoid((keep_prob - thr_soft) / tau_match)
+            # f(thr) = mean_tmp - target_ratio = 0 を解く
+            thr_soft = thr_soft - (mean_tmp - target_ratio) / dmean_dthr
+        soft_mask = torch.sigmoid((keep_prob - thr_soft) / tau_match)        
         """
         tau_match = max(self.tau_match, 1e-6) # SoftMaskの鋭さを決める温度を基に、極端に小さすぎないようにする
         # thr_soft = torch.gather(keep_prob, 1, keep_idx_hard[:, -1:].detach()) # (B,1) # Hard境界の初期値
@@ -186,8 +200,8 @@ class PruningModule(nn.Module):
         
         """==================== STE ===================="""
         mask_st = hard_mask - soft_mask.detach() + soft_mask # (B,N) # forwardとbackwardで分け、勾配が流れるようにする
-        keep_w_full = mask_st.unsqueeze(1) # (B,1,N) # チャネル次元を1つ足して拡張
-        keep_w_hard = torch.gather(keep_w_full, 2, keep_idx_hard.unsqueeze(1)) # Hardに選ばれた点に対する重みだけを抜き出す   
+        keep_w = mask_st.unsqueeze(1) # (B,1,N) # チャネル次元を1つ足して拡張
+        keep_w_hard = torch.gather(keep_w, 2, keep_idx_hard.unsqueeze(1)) # Hardに選ばれた点に対する重みだけを抜き出す   
         keep_w_hard = keep_w_hard * valid_topk_mask.unsqueeze(1).float() # (B,1,K_keep) # 無効位置の重みを0にする
 
         """==================== Calculate Loss ===================="""
@@ -200,7 +214,19 @@ class PruningModule(nn.Module):
         delta_cnt = (mean_keep_ratio - target_ratio).abs() # 予測Keep率と目標Keep率の差
         L_cnt = torch.log1p(128 * delta_cnt).mean() # delta_cntに近いほど小さく数値が動く
         """
-        score = D.squeeze(1)  # (B,N) # 密度スコアを（B,N）に整形
+        target_keep = 1.0 - OutLabel.squeeze(1)   # [B,N], 1=inlier(残す), 0=outlier(消す)
+        target_keep = target_keep.detach()
+
+        # 1) UnOutDetのCrossEntropy相当
+        L_out_bce = torch.nn.functional.binary_cross_entropy_with_logits(prun_logit, target_keep)
+
+        # 2) UnOutDetのLovasz相当（binary版）
+        L_out_lovasz = lovasz_hinge(prun_logit, target_keep)
+        L_out = L_out_bce + L_out_lovasz
+        
+        """
+        # L_out計算
+        score = Den.squeeze(1)  # (B,N) # 密度スコアを（B,N）に整形
         eps = 1e-6
         r = (1.0 / (score + eps)) if self.high_is_inlier else score # スコアが高いほどinlierとする
         r = r / (r.mean(dim=1, keepdim=True) + eps) # スコアを正規化
@@ -208,18 +234,35 @@ class PruningModule(nn.Module):
         w_inlier = w_inlier.detach() # この損失からD側へ勾配が流れないようにする # 密度スコアをこの損失で学習しないように
 
         L_out = torch.nn.functional.mse_loss(mask_st, w_inlier) # 外れ点を消しているか否かの損失計算
+        """
+
         loss_prun = L_out # 削除損失計算
         # loss_prun = self.prun_cnt * L_cnt + self.prun_out * L_out # 削除損失計算
 
         if self.writer is not None and hasattr(self.writer, "write"): # ログ
             self.writer.write(
                 f"L_prun  :{loss_prun:.4f}->"
-                # f"L_cnt:{L_cnt:.4f}, L_out:{L_out:.4f}, "
+                f"L_cnt:{L_cnt:.4f}, L_out:{L_out:.4f}, "
                 f"SoftRatio:{soft_mask.mean(dim=1).mean().item():.6f}, "
                 f"HardRatio:{hard_ratio.mean().item():.6f}"
             )        
-        print(f"SoftMask->max:{soft_mask.max().item():.4f}, mean:{soft_mask.mean().item():.4f}, min:{soft_mask.min().item():.4f}")
-        print(f"HardMask->max:{hard_mask.max().item():.4f}, mean:{hard_mask.mean().item():.4f}, min:{hard_mask.min().item():.4f}")
-        print(self.evaluate_mask_similarity(hard_mask, soft_mask, keep_prob, k=K_keep))
+        # print(f"SoftMask->max:{soft_mask.max().item():.4f}, mean:{soft_mask.mean().item():.4f}, min:{soft_mask.min().item():.4f}")
+        # print(f"HardMask->max:{hard_mask.max().item():.4f}, mean:{hard_mask.mean().item():.4f}, min:{hard_mask.min().item():.4f}")
+        # print(self.evaluate_mask_similarity(hard_mask, soft_mask, keep_prob, k=K_keep))
 
-        return pts_hard, keep_w_hard, keep_w_full, keep_idx_hard, loss_prun, L_cnt, L_out
+        # ===== デバッグ用に内部テンソルを保持 =====
+        self.debug_tensors = {
+            "prun_logit": prun_logit,
+            "keep_prob": keep_prob,
+            "keep_ratio_pred": keep_ratio_pred,
+            "hard_mask": hard_mask,
+            "soft_mask": soft_mask,
+            "keep_w_full": keep_w,
+        }
+
+        # 勾配を後で読めるように retain_grad
+        for name, tensor in self.debug_tensors.items():
+            if isinstance(tensor, torch.Tensor) and tensor.requires_grad:
+                tensor.retain_grad()
+
+        return pts_hard, keep_w, keep_idx_hard, loss_prun, L_cnt, L_out
