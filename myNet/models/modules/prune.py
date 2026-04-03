@@ -130,7 +130,6 @@ class PruningModule(nn.Module):
         """==================== SetUp ===================="""
         B, _, N = pts.shape # バッチサイズ、チャネル数、点数
         x = torch.cat([Ff, Den, Str, Oct, Out], dim=1) # 入力をチャネル方向に統合
-
         h = self.conv_in(x) # 入力層で隠れ表現に変換
         for block in self.blocks: # ResBlockに通す
             h = block(h, x)
@@ -150,26 +149,21 @@ class PruningModule(nn.Module):
         K_keep = int(K_keep_each.max().item()) # バッチ内で最大点数を1つ取り出す
 
         # ==================== Soft ====================
-        tau_match = max(self.tau_match, 1e-6)
-        target_ratio = keep_ratio_pred.unsqueeze(1) # (B,1)
+        tau_match = max(self.tau_match, 1e-6) # Soft Maskの鋭さを決める温度パラメータ
+        target_ratio = keep_ratio_pred.unsqueeze(1) # (B,1) # 予測された残存確率を変形
         thr_soft = keep_prob.mean(dim=1, keepdim=True) # 連続的な初期値
 
-        # Newton法風に、soft_mask の平均が target_ratio に近づく閾値を連続更新する
-        for _ in range(8):
-            soft_tmp = torch.sigmoid((keep_prob - thr_soft) / tau_match) # (B,N)
-            mean_tmp = soft_tmp.mean(dim=1, keepdim=True) # (B,1)
-
-            # Den/dthr sigmoid((x-thr)/tau) = -(1/tau) * Str * (1-Str)
-            dmean_dthr = -(soft_tmp * (1.0 - soft_tmp) / tau_match).mean(dim=1, keepdim=True) # (B,1)
-            dmean_dthr = torch.where( # ゼロ割れ防止
+        for _ in range(8): # Newton法風に、soft_mask の平均が target_ratio に近づく閾値を連続更新する
+            soft_tmp = torch.sigmoid((keep_prob - thr_soft) / tau_match) # (B,N) # 現在の閾値を使って暫定的なSoftMaskを作る
+            mean_tmp = soft_tmp.mean(dim=1, keepdim=True) # (B,1) # 暫定Soft Maskの平均値を計算
+            dmean_dthr = -(soft_tmp * (1.0 - soft_tmp) / tau_match).mean(dim=1, keepdim=True) # (B,1) # Sofat maskの平均値の、閾値に対する微分を近似的に計算
+            dmean_dthr = torch.where( # ゼロ割れ防止 # 微分地が0に近すぎるとゼロ割れなどが起こる為
                 dmean_dthr.abs() < 1e-8,
                 torch.full_like(dmean_dthr, -1e-8),
                 dmean_dthr
             )
-
-            # f(thr) = mean_tmp - target_ratio = 0 を解く
-            thr_soft = thr_soft - (mean_tmp - target_ratio) / dmean_dthr
-        soft_mask = torch.sigmoid((keep_prob - thr_soft) / tau_match)        
+            thr_soft = thr_soft - (mean_tmp - target_ratio) / dmean_dthr # Newton法風の更新 # f(thr) = mean_tmp - target_ratio = 0 を解く
+        soft_mask = torch.sigmoid((keep_prob - thr_soft) / tau_match) # 最終的なthr_softを用いて、Soft Maskをつくる
         """
         tau_match = max(self.tau_match, 1e-6) # SoftMaskの鋭さを決める温度を基に、極端に小さすぎないようにする
         # thr_soft = torch.gather(keep_prob, 1, keep_idx_hard[:, -1:].detach()) # (B,1) # Hard境界の初期値
@@ -228,16 +222,13 @@ class PruningModule(nn.Module):
         delta_cnt = (mean_keep_ratio - target_ratio).abs() # 予測Keep率と目標Keep率の差
         L_cnt = torch.log1p(128 * delta_cnt).mean() # delta_cntに近いほど小さく数値が動く
         """
-        target_keep = 1.0 - OutLabel.squeeze(1)   # [B,N], 1=inlier(残す), 0=outlier(消す)
-        target_keep = target_keep.detach()
-
-        # 1) UnOutDetのCrossEntropy相当
-        L_out_bce = torch.nn.functional.binary_cross_entropy_with_logits(prun_logit, target_keep)
-
-        # 2) UnOutDetのLovasz相当（binary版）
-        L_out_lovasz = lovasz_hinge(prun_logit, target_keep)
-        L_out = L_out_bce + L_out_lovasz
-        
+        target_keep = 1.0 - OutLabel.squeeze(1) # [B,N], 1=inlier(残す), 0=outlier(消す)
+        target_keep = target_keep.detach() # 教師ラベルなので勾配が流れないようにする
+        L_out_bce = torch.nn.functional.binary_cross_entropy_with_logits(prun_logit, target_keep) # prun_logitと教師target_keepとのBCE損失の計算
+        L_out_lovasz = lovasz_hinge(prun_logit, target_keep) # Lovasz hinge損失の計算
+        L_out = L_out_bce + L_out_lovasz # L_outの計算
+        loss_prun = L_out # 削除損失計算
+        # loss_prun = self.prun_cnt * L_cnt + self.prun_out * L_out # 削除損失計算 
         """
         # L_out計算
         score = Den.squeeze(1)  # (B,N) # 密度スコアを（B,N）に整形
@@ -250,19 +241,13 @@ class PruningModule(nn.Module):
         L_out = torch.nn.functional.mse_loss(mask_st, w_inlier) # 外れ点を消しているか否かの損失計算
         """
 
-        loss_prun = L_out # 削除損失計算
-        # loss_prun = self.prun_cnt * L_cnt + self.prun_out * L_out # 削除損失計算
-
         if self.writer is not None and hasattr(self.writer, "write"): # ログ
             self.writer.write(
                 f"L_prun  :{loss_prun:.4f}->"
                 f"L_cnt:{L_cnt:.4f}, L_out:{L_out:.4f}, "
                 f"SoftRatio:{soft_mask.mean(dim=1).mean().item():.6f}, "
                 f"HardRatio:{hard_ratio.mean().item():.6f}"
-            )        
-        # print(f"SoftMask->max:{soft_mask.max().item():.4f}, mean:{soft_mask.mean().item():.4f}, min:{soft_mask.min().item():.4f}")
-        # print(f"HardMask->max:{hard_mask.max().item():.4f}, mean:{hard_mask.mean().item():.4f}, min:{hard_mask.min().item():.4f}")
-        # print(self.evaluate_mask_similarity(hard_mask, soft_mask, keep_prob, k=K_keep))
+            )
 
         # ===== デバッグ用に内部テンソルを保持 =====
         self.debug_tensors = {
