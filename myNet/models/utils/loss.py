@@ -1,10 +1,13 @@
 import os
 import torch
 import time
+import h5py
 import sys
 import numpy as np
 
 from models.utils.utils_repkpu import *
+from models.utils.proxy_oa import proxy_octattention_like_octree_loss
+
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 ROOT_DIR = os.path.abspath(
@@ -12,10 +15,13 @@ ROOT_DIR = os.path.abspath(
 )
 sys.path.append(ROOT_DIR)
 
-from compress.OctAttention.compression import OA_compress
-from compress.OctAttention.encoderTool import *
-from compress.OctAttention.networkTool import *
-from compress.OctAttention.octAttention import *
+# from compress.OctAttention.compression import OA_compress
+# from compress.OctAttention.encoderTool import *
+# from compress.OctAttention.networkTool import *
+# from compress.OctAttention.octAttention import *
+# from compress.ProxyOctree.proxy_octree import OctreeProxyCompressor
+from models.utils.proxy_octree import *
+
 from models.utils.utils_loss import *
 from models.utils.utils_p2c import *
 
@@ -24,255 +30,71 @@ import numpy as np
 import os
 import traceback
 
-def _octseq_worker_main(conn):
-    """
-    Octree生成・matloaderなど「CPU/IO/メモリを食う処理」専用プロセス。
-    ここで起きるメモリの溜まりは、このプロセスを再起動すればOSが回収する。
-    """
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""
-    try:
-        import torch
-        torch.set_num_threads(1)
-    except Exception:
-        pass
-
-    # ここで遅いimportをworker側に閉じ込める
-    from compress.OctAttention.Preparedata.data import dataPrepare
-    from compress.OctAttention.dataset import default_loader as matloader
-    from compress.OctAttention.networkTool import levelNumK
-
-    while True:
-        msg = conn.recv()
-        if msg is None:
-            break
-
-        try:
-            args_dict = msg["args_dict"]
-            pts_np = msg["pts_np"]          # (N,3) float32
-            qs = msg["qs"]
-
-            # RAMディスクを優先（存在しなければ通常dir）
-            ram_dir = "/dev/shm/OctAttention_encoded"
-            saveMatDir = ram_dir if os.path.isdir("/dev/shm") else "compress/OctAttention/encoded"
-            os.makedirs(saveMatDir, exist_ok=True)
-
-            # 重要：毎回ファイル名を固定して増殖させない
-            matFile, DQpt, refPt = dataPrepare(
-                SimpleNamespace(**args_dict),
-                pts_np,
-                saveMatDir,
-                qs=qs,
-                ptNamePrefix="tmp_fixed",
-                rotation=False
-            )
-
-            cell, mat = matloader(matFile)
-
-            # 読み終わったら即削除
-            try:
-                os.remove(matFile)
-            except Exception:
-                pass
-
-            FeatDim = levelNumK
-            oct_data_seq = np.transpose(mat[cell[0, 0]]).astype(np.int32)[:, -FeatDim:, 0:6]
-
-            # 返すのはoct_data_seqのみ（巨大オブジェクトを返さない）
-            conn.send({"ok": True, "oct_data_seq": oct_data_seq})
-        except Exception:
-            conn.send({"ok": False, "err": traceback.format_exc()})
-
-class SimpleNamespace:
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
-
 class Loss:
     def __init__(self, args, file_date, writer):
         self.com_bit = args.com_bit
         self.com_sin = args.com_sin
         self.com_node = args.com_node
 
+        self.lambda_p = args.lambda_p
+
         self.compress = args.compress
         self.file_date = file_date
         self.writer = writer
         self.bptt = args.bptt
         self.ncl = ManifoldnessConstraint(support=8, neighborhood_size=32).to(device)
-        if self.compress == "OctAttention":
-            self.oa_comp = Compression()
-            self.model = build_model(device)
-            # self.model = model
-            self.qs = args.qs
-            self._oa_p = None
-            # self.model = model.to(device)
-            saveDic = reload(None,'../compress/octree/OctAttention/modelsave/obj/encoder_epoch_00800093.pth')
-            self.model.load_state_dict(saveDic['encoder'])
-            # ---- Octree worker 起動（1回だけ）----
-            ctx = mp.get_context("spawn")
-            self._oct_conn_main, oct_conn_worker = ctx.Pipe(duplex=True)
-            self._oct_proc = ctx.Process(target=_octseq_worker_main, args=(oct_conn_worker,), daemon=True)
-            self._oct_proc.start()
 
-            self.com_gt = 0
+        self.octree_cfgs = ProxyOctreeConfig(
+            max_depth=args.proxy_max_depth,
+            lambda_entropy=args.proxy_lambda_entropy,
+            lambda_node_count=args.proxy_lambda_node_count,
+            lambda_single_child=args.proxy_lambda_single_child,
+        )
 
-            # 念のため終了時に止める
-            import atexit
-            def _cleanup_oct_worker():
-                try:
-                    if hasattr(self, "_oct_conn_main") and self._oct_conn_main is not None:
-                        self._oct_conn_main.send(None)
-                except Exception:
-                    pass
-                try:
-                    if hasattr(self, "_oct_proc") and self._oct_proc is not None:
-                        self._oct_proc.join(timeout=1)
-                except Exception:
-                    pass
-
-            atexit.register(_cleanup_oct_worker)
-
-    def _run_octattention_encoder(self, args, pts):
-        """
-        1) workerでoct_data_seqを生成（CPU/IO/リーク源を隔離）
-        2) メインプロセスでcompress（GPU推論は維持）
-        """
-        with torch.no_grad():
-            self.model.eval()
-
-            # pts: [1,3,N] を (N,3) float32 numpy にして送る
-            pts_np = (
-                pts.detach()
-                .squeeze(0)          # (3,N)
-                .transpose(1, 0)     # (N,3)
-                .contiguous()
-                .to("cpu")
-                .numpy()
-                .astype(np.float32, copy=False)
-            )
-
-            # args は必要最小限だけdict化（pickle負担を減らす）
-            args_dict = vars(args)
-
-            self._oct_conn_main.send({
-                "args_dict": args_dict,
-                "pts_np": pts_np,
-                "qs": self.qs
-            })
-            rep = self._oct_conn_main.recv()
-            if not rep["ok"]:
-                raise RuntimeError(rep["err"])
-
-            oct_data_seq = rep["oct_data_seq"]
-
-            # ここからは従来通りGPU側で圧縮推論
-            binsz, oct_len, _, _, _ = self.oa_comp.compress(args, oct_data_seq, self.model, writer=None)
-
-            # single_ratio はoct_data_seqから計算して良いが、重いなら省略
-            single_ratio = 0.0
-            try:
-                from compress.OctAttention.eval import single_child_by_level
-                single_ratio = single_child_by_level(oct_data_seq, writer=None)
-            except Exception:
-                pass
-
-            ptNum = pts.shape[2]
-            bit = binsz
-            bpp = bit / ptNum
-            bpn = bit / oct_len if oct_len > 0 else 0.0
-            return [bit, bpp, bpn, single_ratio, oct_len]
         
-    def get_loss(self, args, gen_pts, gt_pts, same = None):
-        if args.compress == "OctAttention":
-            time_loss = time.time()
+    def get_loss(self, args, gen_pts, gt_pts, final_w):
+        gt_xyz = gt_pts[:, :3, :]
+        gen_xyz = gen_pts[:, :3, :]
+        proxy = SoftOctreeRateProxy(self.octree_cfgs).to(gen_xyz.device)
+        s = time.time()
+        out_gt, bit_gt, _ = proxy(gen_xyz=gt_xyz, final_w=None)
+        print(time.time()-s)
+        out_gen, bit_gen_soft, _ = proxy(gen_xyz=gen_xyz, final_w=final_w)
+        L_com = 100 * (bit_gen_soft - bit_gt) / bit_gt
 
-            if not self._oct_proc.is_alive():
-                print("Oct worker is dead")
+        if args.trainORtest == "test":
+            self.writer.write(f"=== Compression Stats ===")
+            self.writer.write(f"bit                         : {out_gt['bit']} -> {out_gen['bit']}")
+            self.writer.write(f"bpp                         : {out_gt['bpp']} -> {out_gen['bpp']}")
+            self.writer.write(f"bpn                         : {out_gt['bpn']} -> {out_gen['bpn']}")
+            self.writer.write(f"single child node           : {out_gt['single']} -> {out_gen['single']}")
+            self.writer.write(f"num of nodes                : {out_gt['node']} -> {out_gen['node']}")
+            self.writer.write(f"num of points               : {gt_pts.shape[2]} -> {gen_pts.shape[2]}")
 
-            if same == None:
-                com = self._run_octattention_encoder(args, gen_pts)
-                while len(com) < 5:
-                    com.append(None)
-                com_gt = self._run_octattention_encoder(args, gt_pts)
-                while len(com_gt) < 5:
-                    com_gt.append(None)
-            else:
-                if same == 0:
-                    com = self._run_octattention_encoder(args, gen_pts)
-                    while len(com) < 5:
-                        com.append(None)
-                    com_gt = self._run_octattention_encoder(args, gt_pts)
-                    while len(com_gt) < 5:
-                        com_gt.append(None)
-                    self.com_gt = com_gt
-                else:
-                    com = self._run_octattention_encoder(args, gen_pts)
-                    while len(com) < 5:
-                        com.append(None)
-                    com_gt = self.com_gt
-                    while len(com_gt) < 5:
-                        com_gt.append(None)
+        loss_bit = (float(out_gen["rate_total"].detach().cpu())-float(out_gt["rate_total"].detach().cpu()))/(float(out_gt["rate_total"].detach().cpu()) + 1e-12)
+        loss_single = (float(out_gen["soft_single_child_count"].detach().cpu())-float(out_gt["soft_single_child_count"].detach().cpu()))/(float(out_gt["rate_total"].detach().cpu()) + 1e-12)
+        loss_nodes = (float(out_gen["soft_node_count"].detach().cpu())-float(out_gt["soft_node_count"].detach().cpu()))/(float(out_gt["rate_total"].detach().cpu()) + 1e-12)
 
-            # ===== Geometry Loss =====
-            L_geom = 0.0
-            if args.loss_type == "cd":
-                L_geom = chamfer_l2_loss(gen_pts, gt_pts)
-                self.writer.write(f"L_geom  :{L_geom.item():.4f}->L_cd:{L_geom.item():.4f}")
-            elif args.loss_type == "p2p":
-                gt_normals = estimate_normals_open3d(gt_pts, k=16)
-                L_geom = point2plane_loss(
-                    gen_pts, gt_pts,
-                    gt_normals=gt_normals, k=16
-                )
-            elif args.loss_type == "psnr":
-                L_geom = 1-psnr_loss(gen_pts, gt_pts)
-            elif args.loss_type == "cd+p2p":
-                loss_cd = chamfer_l2_loss(gen_pts, gt_pts)
-                gt_normals = estimate_normals_open3d(gt_pts, k=16)
-                loss_p2p = point2plane_loss(
-                    gen_pts, gt_pts,
-                    gt_normals=gt_normals, k=16
-                )
-                L_geom = loss_cd + 0.1 * loss_p2p
-            elif args.loss_type == "cd+nc":
-                loss_cd = chamfer_l2_loss(gen_pts, gt_pts)
-                y = time.time()
-                loss_nc = self.ncl(gen_pts)
-                z = time.time()
-                L_geom = 0.1 * loss_cd + 100 * loss_nc
-                self.writer.write(f"Loss_nc:{loss_nc.item()}, Loss_cd:{loss_cd}, Total:{L_geom.item()}")
-            elif args.loss_type == "p2p+ncl":
-                gt_normals = estimate_normals_open3d(gt_pts, k=16)
-                loss_p2p = point2plane_loss(gen_pts, gt_pts, gt_normals)
-                loss_ncl = normal_consistency_loss(gen_pts, gt_pts, gt_normals)
+        # ===== Geometry Loss =====
+        L_geom = 0.0
+        if args.loss_type == "cd":
+            L_cd_hard = chamfer_l2_loss(gen_pts, gt_pts)
+            L_cd_soft = chamfer_l2_loss(gen_pts, gt_pts, final_w)
+            # L_cd = self.lambda_p * L_cd_hard + L_cd_soft
+            L_geom = L_cd_soft
+            self.writer.write(f"L_geom  :{L_cd_soft:.4f}")
+        elif args.loss_type == "cd+d2":
+            L_cd_hard = chamfer_l2_loss(gen_pts, gt_pts)
+            L_cd_soft = chamfer_l2_loss(gen_pts, gt_pts, final_w)
+            L_cd = self.lambda_p * L_cd_hard + L_cd_soft
 
-                L_geom = loss_p2p + 0.1 * loss_ncl
-            else:
-                raise ValueError(f"Unknown loss_type: {args.loss_type}")
-            
-            if args.trainORtest == "test":
-                self.writer.write(f"=== Compression Stats ===")
-                self.writer.write(f"bit                         : {com_gt[0]} -> {com[0]}")
-                self.writer.write(f"bpp                         : {com_gt[1]} -> {com[1]}")
-                self.writer.write(f"bpn                         : {com_gt[2]} -> {com[2]}")
-                self.writer.write(f"ratio of single child node  : {com_gt[3]} -> {com[3]}")
-                self.writer.write(f"num of nodes                : {com_gt[4]} -> {com[4]}")
-                self.writer.write(f"num of points               : {gt_pts.shape[2]} -> {gen_pts.shape[2]}")
+            L_d2_hard = compute_d2_psnr(gen_pts, gt_pts)
+            L_d2_soft = compute_d2_psnr(gen_pts, gt_pts, final_w=final_w)
+            L_d2 = self.lambda_p * L_d2_hard + L_d2_soft
 
-            loss_bit = (com[0]-com_gt[0])/com_gt[0]
-            loss_single = (com[3]-com_gt[3])/com_gt[3]
-            loss_nodes = (com[4]-com_gt[4])/com_gt[4]
-
-            loss_num = (gen_pts.shape[2]-gt_pts.shape[2])/gt_pts.shape[2]
-
-            if loss_bit > 0: # 圧縮効率が悪化した場合ペナルティを大きく
-                com_bit = self.com_bit * 5
-            else:
-                com_bit = self.com_bit
-            # === Compression Loss ===
-            L_com = com_bit*loss_bit + self.com_sin*loss_single + self.com_node*loss_nodes
-
-            self.writer.write(f"L_com   :{L_com:.4f}->L_bit:{loss_bit:.4f}, L_single:{loss_single:.4f}, L_nodes:{loss_nodes:.4f}")
-            # Loss = self.alpha*L_geom + L_com
-            # self.writer.write(f"Loss:{Loss.item()}->L_geom:{L_geom.item()}, L_bit:{loss_bit}, L_single:{loss_single}, L_nodes:{loss_nodes}")
-            # self.writer.write(f"=== Loss Function ===")
-
-            return L_geom, L_com, loss_bit, loss_num
+            L_geom += L_cd + 0.2 * L_d2
+            self.writer.write(f"L_geom  :{L_geom.item():.4f}->L_cd:{L_cd.item():.4f}, L_d2:{L_d2.item():.4f}")
+        
+        self.writer.write(f"L_com   :{L_com:.4f}->L_bit:{loss_bit:.4f}, L_single:{loss_single:.4f}, L_nodes:{loss_nodes:.4f}")
+        
+        return L_geom, L_com, loss_bit, loss_single, loss_nodes

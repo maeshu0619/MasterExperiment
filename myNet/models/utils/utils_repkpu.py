@@ -111,7 +111,6 @@ def FPS(pts, fps_pts_num):
 
 def get_knn_pts(k, pts, center_pts, return_idx=False):
     # input: (b, 3, n)
-
     # (b, n, 3)
     pts_trans = rearrange(pts, 'b c n -> b n c').contiguous()
     # (b, m, 3)

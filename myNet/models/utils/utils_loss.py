@@ -191,17 +191,61 @@ def _normalize_point_cloud(pc):
     pc = pc / furthest_distance
     return pc
 
-def chamfer_l2_loss(gen_pts: torch.Tensor, gt_pts: torch.Tensor) -> torch.Tensor:
+def chamfer_l2_loss(gen_pts: torch.Tensor, gt_pts: torch.Tensor, final_w: torch.Tensor = None) -> torch.Tensor:
     """
     gen_pts, gt_pts: [B,3,N]
     """
+    if final_w is None:
+        # RepKPU と同様に正規化
+        gen = gen_pts.transpose(1, 2).contiguous()
+        gt  = gt_pts.transpose(1, 2).contiguous()
 
-    # RepKPU と同様に正規化
-    gen = gen_pts.transpose(1, 2).contiguous()
-    gt  = gt_pts.transpose(1, 2).contiguous()
+        dist1, dist2, _, _ = chamfer_dist(gen, gt)
+        return dist1.mean() + dist2.mean()
+    elif final_w is not None:
+        gen = gen_pts.transpose(1, 2).contiguous()  # [B,N,3]
+        gt  = gt_pts.transpose(1, 2).contiguous()   # [B,M,3]
 
-    dist1, dist2, _, _ = chamfer_dist(gen, gt)
-    return dist1.mean() + dist2.mean()
+        dist1, dist2, _, _ = chamfer_dist(gen, gt)  # dist1: [B,N], dist2: [B,M]
+
+        if final_w.dim() == 3:
+            w = final_w.squeeze(1)  # [B,N]
+        else:
+            w = final_w
+        w = w.clamp(0.0, 1.0).to(dist1.dtype)
+
+        # gen->gt を重み付き平均、gt->gen は従来通り平均（ここは最小実装）
+        loss1 = (dist1 * w).sum() / (w.sum() + 1e-12)
+        loss2 = dist2.mean()
+        return loss1 + loss2
+
+def chamfer_prune_soft_loss(
+    gen_pts: torch.Tensor,
+    gt_pts: torch.Tensor,
+    final_w: torch.Tensor,
+    detach_dist: bool = True
+) -> torch.Tensor:
+    """
+    gen_pts: [B, 3, N_gen]   最終出力点群
+    gt_pts:  [B, 3, N_gt]    入力点群 = GT
+    keep_w_full: [B, 1, N_gt]  Pruning前全点に対する keep重み
+    """
+
+    gen = gen_pts.transpose(1, 2).contiguous()   # [B, N_gen, 3]
+    gt  = gt_pts.transpose(1, 2).contiguous()    # [B, N_gt, 3]
+
+    dist1, dist2, _, _ = chamfer_dist(gen, gt)   # dist2: [B, N_gt]
+
+    if detach_dist:
+        dist2 = dist2.detach()
+
+    final_w = final_w.clamp(0.0, 1.0).to(dist2.dtype)
+
+    # 落とした点ほど重く見る
+    drop_w = 1.0 - final_w
+
+    loss = (dist2 * drop_w).sum() / (drop_w.sum() + 1e-12)
+    return loss
 
 def psnr_loss(gen_pts: torch.Tensor, gt_pts: torch.Tensor, peak=1023.0) -> torch.Tensor:
     """
@@ -428,3 +472,208 @@ def prune_outlier_loss(keep_prob, density):
     d_norm = density / (density.mean(dim=1, keepdim=True) + 1e-6)
     loss = (keep_prob * d_norm).mean()
     return loss
+
+def compute_d2_psnr(
+    ref: torch.Tensor,
+    rec: torch.Tensor,
+    k_normal: int = 16,
+    peak_mode: str = "union_bbox_diag",
+    final_w: torch.Tensor = None
+):
+    """
+    ref, rec: [B,3,N]
+    final_w:
+        - None      : 従来計算
+        - [B,1,N_ref] or [B,N_ref]
+          ref->rec 側の d2 を重み付き平均する
+          chamfer_l2_loss と同じ思想
+    """
+
+    assert isinstance(ref, torch.Tensor) and isinstance(rec, torch.Tensor)
+    assert ref.ndim == 3 and rec.ndim == 3
+
+    device = ref.device
+
+    ref_xyz = ref.permute(0, 2, 1).contiguous()  # [B,N_ref,3]
+    rec_xyz = rec.permute(0, 2, 1).contiguous()  # [B,N_rec,3]
+
+    B, N_ref, _ = ref_xyz.shape
+    _, N_rec, _ = rec_xyz.shape
+
+    if N_ref == 0 or N_rec == 0:
+        return torch.tensor(0.0, dtype=torch.float32, device=device)
+
+    ref_normals = estimate_normals_open3d(ref, k=k_normal).permute(0, 2, 1).contiguous()
+    rec_normals = estimate_normals_open3d(rec, k=k_normal).permute(0, 2, 1).contiguous()
+
+    # ref -> rec
+    ref_to_rec_idx = _faiss_knn_idx(ref_xyz, rec_xyz, 1).squeeze(-1)  # [B,N_ref]
+    # rec -> ref
+    rec_to_ref_idx = _faiss_knn_idx(rec_xyz, ref_xyz, 1).squeeze(-1)  # [B,N_rec]
+
+    ref_base = (torch.arange(B, device=device).view(B, 1) * N_ref)
+    rec_base = (torch.arange(B, device=device).view(B, 1) * N_rec)
+
+    ref_xyz_flat = ref_xyz.reshape(B * N_ref, 3)
+    rec_xyz_flat = rec_xyz.reshape(B * N_rec, 3)
+    ref_n_flat   = ref_normals.reshape(B * N_ref, 3)
+    rec_n_flat   = rec_normals.reshape(B * N_rec, 3)
+
+    # -------------------------
+    # 1. ref -> rec の d2
+    # -------------------------
+    ref_to_rec_flat = (ref_to_rec_idx + rec_base).reshape(-1)
+    nn_rec_xyz = rec_xyz_flat[ref_to_rec_flat].reshape(B, N_ref, 3)
+    nn_rec_n   = rec_n_flat[ref_to_rec_flat].reshape(B, N_ref, 3)
+
+    diff_bwd = ref_xyz - nn_rec_xyz
+    proj_bwd = (diff_bwd * nn_rec_n).sum(dim=2)
+    bwd_sq   = proj_bwd * proj_bwd
+
+    if final_w is not None:
+        if final_w.dim() == 3:
+            w = final_w.squeeze(1)   # [B,N_ref]
+        else:
+            w = final_w
+
+        w = w.clamp(0.0, 1.0).to(bwd_sq.dtype)
+
+        if w.shape[1] != N_ref:
+            raise ValueError(
+                f"final_w shape mismatch: got {tuple(w.shape)}, expected second dim = {N_ref}"
+            )
+
+        bwd_mse = (bwd_sq * w).sum() / (w.sum() + 1e-12)
+    else:
+        bwd_mse = bwd_sq.mean()
+
+    # -------------------------
+    # 2. rec -> ref の d2
+    # -------------------------
+    rec_to_ref_flat = (rec_to_ref_idx + ref_base).reshape(-1)
+    nn_ref_xyz = ref_xyz_flat[rec_to_ref_flat].reshape(B, N_rec, 3)
+    nn_ref_n   = ref_n_flat[rec_to_ref_flat].reshape(B, N_rec, 3)
+
+    diff_fwd = rec_xyz - nn_ref_xyz
+    proj_fwd = (diff_fwd * nn_ref_n).sum(dim=2)
+    fwd_sq   = proj_fwd * proj_fwd
+
+    fwd_mse = fwd_sq.mean()
+
+    mse = 0.5 * (bwd_mse + fwd_mse)
+
+    if mse <= 1e-30:
+        return torch.tensor(float("inf"), dtype=torch.float32, device=device)
+
+    if peak_mode == "union_bbox_diag":
+        all_pts = torch.cat([ref_xyz, rec_xyz], dim=1)
+    else:
+        all_pts = ref_xyz
+
+    mins = all_pts.amin(dim=1)
+    maxs = all_pts.amax(dim=1)
+    peak = torch.linalg.norm(maxs - mins, dim=1)
+    peak2 = (peak * peak).mean()
+
+    psnr = 10.0 * torch.log10(peak2 / (mse + 1e-8))
+    return psnr
+
+# def compute_d2_psnr(ref, rec, k_normal=16, peak_mode="union_bbox_diag"):
+#     """
+#     ref, rec:
+#         - torch.Tensor [B,3,N] または [1,3,N]
+#         - numpy (N,3)
+#         - str (PLY path)
+
+#     戻り値:
+#         torch scalar（deviceは入力Tensorに合わせる）
+#     """
+
+#     # -------------------------
+#     # 1. Tensorをnumpyへ安全に変換
+#     # -------------------------
+#     def _to_numpy_points(x):
+#         if isinstance(x, torch.Tensor):
+#             # [B,3,N] -> (N,3)
+#             if x.ndim == 3:
+#                 x = x[0]
+#             x = x.transpose(0, 1).contiguous()
+#             return x.detach().cpu().numpy().astype(np.float64)
+#         elif isinstance(x, str):
+#             pcd = o3d.io.read_point_cloud(x)
+#             return np.asarray(pcd.points, dtype=np.float64)
+#         else:
+#             return np.asarray(x, dtype=np.float64)
+
+#     ref_points = _to_numpy_points(ref)
+#     rec_points = _to_numpy_points(rec)
+
+#     if ref_points.shape[0] == 0 or rec_points.shape[0] == 0:
+#         return torch.tensor(0.0, device=ref.device if isinstance(ref, torch.Tensor) else "cpu")
+
+#     # -------------------------
+#     # 2. 法線推定（Open3D）
+#     # -------------------------
+#     def _estimate_normals_unit(points):
+#         pcd = o3d.geometry.PointCloud()
+#         pcd.points = o3d.utility.Vector3dVector(points)
+#         pcd.estimate_normals(
+#             search_param=o3d.geometry.KDTreeSearchParamKNN(knn=int(k_normal))
+#         )
+#         n = np.asarray(pcd.normals, dtype=np.float64)
+#         norm = np.linalg.norm(n, axis=1, keepdims=True)
+#         return n / (norm + 1e-12)
+
+#     ref_normals = _estimate_normals_unit(ref_points)
+#     rec_normals = _estimate_normals_unit(rec_points)
+
+#     # -------------------------
+#     # 3. KDTree
+#     # -------------------------
+#     ref_pcd = o3d.geometry.PointCloud()
+#     ref_pcd.points = o3d.utility.Vector3dVector(ref_points)
+#     rec_pcd = o3d.geometry.PointCloud()
+#     rec_pcd.points = o3d.utility.Vector3dVector(rec_points)
+
+#     ref_kd = o3d.geometry.KDTreeFlann(ref_pcd)
+#     rec_kd = o3d.geometry.KDTreeFlann(rec_pcd)
+
+#     # forward
+#     fwd_sq = []
+#     for p in rec_points:
+#         _, idx, _ = ref_kd.search_knn_vector_3d(p, 1)
+#         j = idx[0]
+#         diff = p - ref_points[j]
+#         dist = np.dot(diff, ref_normals[j])
+#         fwd_sq.append(dist * dist)
+
+#     # backward
+#     bwd_sq = []
+#     for p in ref_points:
+#         _, idx, _ = rec_kd.search_knn_vector_3d(p, 1)
+#         j = idx[0]
+#         diff = p - rec_points[j]
+#         dist = np.dot(diff, rec_normals[j])
+#         bwd_sq.append(dist * dist)
+
+#     mse = 0.5 * (np.mean(fwd_sq) + np.mean(bwd_sq))
+#     if mse <= 1e-30:
+#         return torch.tensor(float("inf"), device=ref.device if isinstance(ref, torch.Tensor) else "cpu")
+
+#     # -------------------------
+#     # 4. peak計算
+#     # -------------------------
+#     if peak_mode == "union_bbox_diag":
+#         all_pts = np.vstack([ref_points, rec_points])
+#     else:
+#         all_pts = ref_points
+
+#     mins = all_pts.min(axis=0)
+#     maxs = all_pts.max(axis=0)
+#     peak = np.linalg.norm(maxs - mins)
+
+#     psnr = 10.0 * np.log10((peak * peak) / mse)
+
+#     # torch scalarとして返す
+#     device = ref.device if isinstance(ref, torch.Tensor) else "cpu"
+#     return torch.tensor(psnr, dtype=torch.float32, device=device)

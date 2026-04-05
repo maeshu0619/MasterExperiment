@@ -8,6 +8,7 @@ class AddModule(nn.Module):
         super().__init__()
         self.cfgs = cfgs
         self.writer = writer
+        self.debug_tensors = {} 
 
         # 中間層のディメンション計算
         in_dim = 3 + cfgs.local_feat_dim + 2 + cfgs.octree_ctx_dim
@@ -298,11 +299,14 @@ class AddModule(nn.Module):
             thr_soft = thr_soft - (mean_tmp - target_ratio) / dmean_dthr
 
         soft_mask = torch.sigmoid((add_logit - thr_soft) / tau_match)
+        soft_mask.retain_grad() 
         
         """==================== STE mask ===================="""
         mask_st = hard_mask - soft_mask.detach() + soft_mask # (B,N) # forwardはHardMask、backwardはSoftMaskになるSTEマスク
+        mask_st.retain_grad() 
         add_w = mask_st.unsqueeze(1) # (B,1,N) #下流の計算のために(B,1,N)に形を整える
-    
+        add_w.retain_grad() 
+
         """==================== Calculate Loss ===================="""
         add_w_hard = torch.gather(add_w, 2, add_idx.unsqueeze(1)) # (B,1,K) # Hardで選ばれた点の重みを取り出す
         L_fit = self._compute_L_fit(pts, new_pts_hard, add_w_hard)
@@ -325,6 +329,19 @@ class AddModule(nn.Module):
                 f"AddRatio(hard):{hard_ratio.mean().item():.6f}"
             )
 
+        # ===== デバッグ用に内部テンソルを保持 =====
+        self.debug_tensors = {
+            "add_logit": add_logit,   # どこに追加するか
+            "mag": mag,               # どのくらい追加するか
+            "dir_vec": dir_vec,       # どの方向に追加するか
+            "add_mask": mask_st,      # 実際に下流へ流しているSTE mask
+        }
+
+        # 勾配を後で読めるように retain_grad
+        for name, tensor in self.debug_tensors.items():
+            if isinstance(tensor, torch.Tensor) and tensor.requires_grad:
+                tensor.retain_grad()
+                
         # print(f"SoftMask->max:{soft_mask.max().item():.4f}, mean:{soft_mask.mean().item():.4f}, min:{soft_mask.min().item():.4f}")
         # print(f"HardMask->max:{hard_mask.max().item():.4f}, mean:{hard_mask.mean().item():.4f}, min:{hard_mask.min().item():.4f}")
         # print(self.evaluate_mask_similarity(hard_mask, soft_mask, add_prob, k=K))
