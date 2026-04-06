@@ -52,47 +52,6 @@ class PruningModule(nn.Module):
         self.act_out_ratio = nn.ReLU()
         self.conv_out_ratio = nn.Conv1d(hidden, 1, 1)
 
-    def _solve_soft_threshold(self, keep_prob, keep_ratio_pred):
-        tau_match = max(self.tau_match, 1e-6)
-        with torch.no_grad():
-            target_ratio = keep_ratio_pred.unsqueeze(1)
-            thr_soft = keep_prob.mean(dim=1, keepdim=True)
-            for _ in range(8):
-                soft_tmp = torch.sigmoid((keep_prob - thr_soft) / tau_match)
-                mean_tmp = soft_tmp.mean(dim=1, keepdim=True)
-                dmean_dthr = -(soft_tmp * (1.0 - soft_tmp) / tau_match).mean(dim=1, keepdim=True)
-                dmean_dthr = torch.where(
-                    dmean_dthr.abs() < 1e-8,
-                    torch.full_like(dmean_dthr, -1e-8),
-                    dmean_dthr
-                )
-                thr_soft = thr_soft - (mean_tmp - target_ratio) / dmean_dthr
-        return thr_soft
-
-    def _build_hard_selection(self, pts, keep_prob, k_each):
-        B, _, N = pts.shape
-        max_keep = int(k_each.max().item())
-        keep_idx_hard = torch.topk(
-            keep_prob,
-            k=max_keep,
-            dim=1,
-            largest=True,
-            sorted=True,
-        ).indices
-        valid_topk_mask = (
-            torch.arange(max_keep, device=pts.device).unsqueeze(0) < k_each.unsqueeze(1)
-        )
-        hard_mask = torch.zeros_like(keep_prob)
-        hard_mask.scatter_(1, keep_idx_hard, valid_topk_mask.to(keep_prob.dtype))
-
-        pts_prun_hard = torch.gather(
-            pts,
-            2,
-            keep_idx_hard.unsqueeze(1).expand(-1, pts.size(1), -1),
-        )
-        pts_prun_hard = pts_prun_hard * valid_topk_mask.unsqueeze(1).to(pts.dtype)
-        return pts_prun_hard, keep_idx_hard, hard_mask, valid_topk_mask
-
     def sample_binary_concrete(self, logit):
         eps = 1e-10
         u = torch.rand_like(logit).clamp_(eps, 1 - eps)
@@ -190,23 +149,54 @@ class PruningModule(nn.Module):
             K_keep_each = torch.clamp(K_keep_each, min=1, max=N) # 残す点数を1～N範囲に制限
 
             # ==================== Soft ====================
-            tau_match = max(self.tau_match, 1e-6)
-            thr_soft = self._solve_soft_threshold(keep_prob, keep_ratio_pred)
+            tau_match = max(self.tau_match, 1e-6) # Soft Maskの鋭さを決める温度パラメータ
+            target_ratio = keep_ratio_pred.unsqueeze(1) # (B,1) # 予測された残存確率を変形
+            thr_soft = keep_prob.mean(dim=1, keepdim=True) # 連続的な初期値
+
+            for _ in range(8): # Newton法風に、soft_mask の平均が target_ratio に近づく閾値を連続更新する
+                soft_tmp = torch.sigmoid((keep_prob - thr_soft) / tau_match) # (B,N) # 現在の閾値を使って暫定的なSoftMaskを作る
+                mean_tmp = soft_tmp.mean(dim=1, keepdim=True) # (B,1) # 暫定Soft Maskの平均値を計算
+                dmean_dthr = -(soft_tmp * (1.0 - soft_tmp) / tau_match).mean(dim=1, keepdim=True) # (B,1) # Sofat maskの平均値の、閾値に対する微分を近似的に計算
+                dmean_dthr = torch.where( # ゼロ割れ防止 # 微分地が0に近すぎるとゼロ割れなどが起こる為
+                    dmean_dthr.abs() < 1e-8,
+                    torch.full_like(dmean_dthr, -1e-8),
+                    dmean_dthr
+                )
+                thr_soft = thr_soft - (mean_tmp - target_ratio) / dmean_dthr # Newton法風の更新 # f(thr) = mean_tmp - target_ratio = 0 を解く
             soft_mask = torch.sigmoid((keep_prob - thr_soft) / tau_match) # 最終的なthr_softを用いて、Soft Maskをつくる
             
             """==================== Hard ===================="""        
-            pts_prun_hard, keep_idx_hard, hard_mask, valid_topk_mask = self._build_hard_selection(
-                pts,
-                keep_prob,
-                K_keep_each,
-            )
+            hard_mask = (keep_prob >= thr_soft).float() # [B,N] # keep_prob を閾値で2値化 # thr_soft以下なら削除
+            if hard_mask.sum(dim=1).min().item() < 1: # 少なくとも1点は残す保険
+                max_idx = keep_prob.argmax(dim=1, keepdim=True) # [B,1] # 格サンプルで最も残存率の高い点のindexを取得
+                hard_mask = torch.zeros_like(keep_prob) # HardMaskを0で初期化
+                hard_mask.scatter_(1, max_idx, 1.0) # 最もっ確率の高い点だけを強制的に残す
             hard_ratio = hard_mask.mean(dim=1) # [B] # 全点のうち何割残ったかを計算
+
+            keep_idx_list = []
+            max_keep = int(hard_mask.sum(dim=1).max().item()) # 最も多く残ったサンプルの残存点数を取り、その値をindex長の基準とする
+
+            for b in range(B): # バッチごとに残存点indexを作成
+                idx_b = torch.nonzero(hard_mask[b] > 0.5, as_tuple=False).squeeze(1) # サンプルbにおいてHardMaskが1の点を取り出す
+                if idx_b.numel() == 0: # サンプル0なら分岐
+                    idx_b = keep_prob[b].argmax().view(1) # 最も確率が高い1点だけを残す
+                if idx_b.numel() < max_keep: # 最大残存点数より少ないなら分岐
+                    pad = idx_b[-1:].repeat(max_keep - idx_b.numel()) # 足りない分だけ最後のindexを繰り返して埋める
+                    idx_b = torch.cat([idx_b, pad], dim=0) # 元のindex列の後ろにpaddingを繋ぎ、長さを揃える
+                keep_idx_list.append(idx_b) # 残存点indexをリストに追加
+
+            keep_idx_hard = torch.stack(keep_idx_list, dim=0) # [B,max_keep] # バッチの残存点indexをまとめてテンソル化
+            valid_topk_mask = torch.arange(max_keep, device=pts.device).unsqueeze(0) < hard_mask.sum(dim=1, keepdim=True) # 本当に有効な位置だけを1にする
+
+            idx_expand = keep_idx_hard.unsqueeze(1).expand(-1, 3, -1) # 座標からGatherできるように、indexをxyzの3チャネルに拡張
+            pts_prun_hard = torch.gather(pts, 2, idx_expand) # 元の点群ptsから、残す点だけ取り出す
+            pts_prun_hard = pts_prun_hard * valid_topk_mask.unsqueeze(1).float() # paddingのダミー位置を0にして、実際に有効な残存点だけを残す
 
             """==================== STE ===================="""
             mask_st = hard_mask - soft_mask.detach() + soft_mask # (B,N) # forwardとbackwardで分け、勾配が流れるようにする
             keep_w = mask_st.unsqueeze(1) # (B,1,N) # チャネル次元を1つ足して拡張
             keep_w_hard = torch.gather(keep_w, 2, keep_idx_hard.unsqueeze(1)) # Hardに選ばれた点に対する重みだけを抜き出す   
-            keep_w_hard = keep_w_hard * valid_topk_mask.unsqueeze(1).to(keep_w.dtype) # (B,1,K_keep) # 無効位置の重みを0にする
+            keep_w_hard = keep_w_hard * valid_topk_mask.unsqueeze(1).float() # (B,1,K_keep) # 無効位置の重みを0にする
 
             """==================== Calculate Loss ===================="""
             target_keep = 1.0 - OutLabel.squeeze(1) # [B,N], 1=inlier(残す), 0=outlier(消す)
@@ -216,7 +206,7 @@ class PruningModule(nn.Module):
             L_out = L_out_bce + L_out_lovasz # L_outの計算
             loss_prun = L_out # 削除損失計算
 
-            if getattr(self.args, "verbose_step_logs", False) and self.writer is not None and hasattr(self.writer, "write"): # ログ
+            if self.writer is not None and hasattr(self.writer, "write"): # ログ
                 self.writer.write(
                     f"L_prun  :{loss_prun:.4f}->"
                     f"L_out:{L_out:.4f}, "
@@ -251,20 +241,33 @@ class PruningModule(nn.Module):
                 h = block(h, x)
             prun_logit = self.conv_out_keep(self.act_out_keep(self.bn_out_keep(h))).squeeze(1) # (B,N) # 各点に対する「残す強さ」の生スコア
             keep_prob = torch.sigmoid(prun_logit) # (B,N) # sigmoidに通して、各点の残存確率を(0,1)に変換
-
-            ratio_feat = self.act_out_ratio(self.bn_out_ratio(h)) # (B, hidden, N)
-            ratio_feat = ratio_feat.mean(dim=2, keepdim=True) # (B, hidden, 1)
-            ratio_logit = self.conv_out_ratio(ratio_feat).squeeze(2).squeeze(1) # (B,)
-            ratio_raw = torch.sigmoid(ratio_logit) # (B,)
-            keep_ratio_pred = self.ratio_min + (self.ratio_max - self.ratio_min) * ratio_raw # (B,)
-
+            thr_soft = keep_prob.mean(dim=1, keepdim=True) # 連続的な初期値
+    
             """==================== Hard ===================="""        
-            K_keep_each = torch.round(keep_ratio_pred.detach() * N).long() # (B,)
-            K_keep_each = torch.clamp(K_keep_each, min=1, max=N)
-            pts_prun_hard, keep_idx_hard, _, _ = self._build_hard_selection(
-                pts,
-                keep_prob,
-                K_keep_each,
-            )
+            hard_mask = (keep_prob >= thr_soft).float() # [B,N] # keep_prob を閾値で2値化 # thr_soft以下なら削除
+            if hard_mask.sum(dim=1).min().item() < 1: # 少なくとも1点は残す保険
+                max_idx = keep_prob.argmax(dim=1, keepdim=True) # [B,1] # 格サンプルで最も残存率の高い点のindexを取得
+                hard_mask = torch.zeros_like(keep_prob) # HardMaskを0で初期化
+                hard_mask.scatter_(1, max_idx, 1.0) # 最もっ確率の高い点だけを強制的に残す
+            hard_ratio = hard_mask.mean(dim=1) # [B] # 全点のうち何割残ったかを計算
+
+            keep_idx_list = []
+            max_keep = int(hard_mask.sum(dim=1).max().item()) # 最も多く残ったサンプルの残存点数を取り、その値をindex長の基準とする
+
+            for b in range(B): # バッチごとに残存点indexを作成
+                idx_b = torch.nonzero(hard_mask[b] > 0.5, as_tuple=False).squeeze(1) # サンプルbにおいてHardMaskが1の点を取り出す
+                if idx_b.numel() == 0: # サンプル0なら分岐
+                    idx_b = keep_prob[b].argmax().view(1) # 最も確率が高い1点だけを残す
+                if idx_b.numel() < max_keep: # 最大残存点数より少ないなら分岐
+                    pad = idx_b[-1:].repeat(max_keep - idx_b.numel()) # 足りない分だけ最後のindexを繰り返して埋める
+                    idx_b = torch.cat([idx_b, pad], dim=0) # 元のindex列の後ろにpaddingを繋ぎ、長さを揃える
+                keep_idx_list.append(idx_b) # 残存点indexをリストに追加
+
+            keep_idx_hard = torch.stack(keep_idx_list, dim=0) # [B,max_keep] # バッチの残存点indexをまとめてテンソル化
+            valid_topk_mask = torch.arange(max_keep, device=pts.device).unsqueeze(0) < hard_mask.sum(dim=1, keepdim=True) # 本当に有効な位置だけを1にする
+
+            idx_expand = keep_idx_hard.unsqueeze(1).expand(-1, 3, -1) # 座標からGatherできるように、indexをxyzの3チャネルに拡張
+            pts_prun_hard = torch.gather(pts, 2, idx_expand) # 元の点群ptsから、残す点だけ取り出す
+            pts_prun_hard = pts_prun_hard * valid_topk_mask.unsqueeze(1).float() # paddingのダミー位置を0にして、実際に有効な残存点だけを残す
 
             return pts_prun_hard, keep_idx_hard
