@@ -21,15 +21,17 @@ class AddModule(nn.Module):
         self.add_cnt = args.add_cnt
         self.add_fit = args.add_fit
         self.add_rep = args.add_rep
+        self.add_oct = float(getattr(args, "add_oct_weight", 0.0))
 
         self.tau = float(getattr(args, "add_tau", 0.5)) # Gumbel-Sigmoid温度
         self.conv_radius = float(getattr(args, "add_conv_radius", 1.0)) # fit正規化用（RepKPUのconv_radius相当）
         self.repulse_extent = float(getattr(args, "add_repulse_extent", 0.5)) # rep閾値（RepKPUのrepulse_extent相当、conv_radiusで正規化後の距離閾値）      
         self.rep_max_points = int(getattr(args, "add_rep_max_points", 2048)) # rep計算の最大点数（O(M^2)を避ける）
-        self.max_ratio = float(getattr(args, "max_add_ratio", 0.05)) # max追加点数（安全上限）
+        self.max_ratio = float(getattr(args, "max_add_ratio", 0.03)) # max追加点数（安全上限）
         self.max_offset = float(getattr(self.args, "max_offset", 1.0)) # 追加点の移動距離の最大量
         self.tau_match = float(getattr(self.args, "add_soft_match_tau", 0.05)) # Soft化の温度パラメータ
         self.sharpness = float(getattr(self.args, "add_soft_sharpness", 6.0)) # 係数 sharpness は調整用
+        self.qs = float(getattr(self.args, "qs", 2.0))
 
         # 共有MLP
         self.mlp = nn.Sequential(
@@ -57,6 +59,13 @@ class AddModule(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv1d(hidden_dim, 1, 1),
         )
+        self.last_policy_log_prob = None
+
+    @staticmethod
+    def _bernoulli_mask_log_prob(logit, hard_mask):
+        log_p_add = F.logsigmoid(logit)
+        log_p_skip = F.logsigmoid(-logit)
+        return (hard_mask.detach() * log_p_add + (1.0 - hard_mask.detach()) * log_p_skip).mean()
 
     def _sample_binary_concrete(self, logit: torch.Tensor):
         """
@@ -192,6 +201,35 @@ class AddModule(nn.Module):
 
         return rep.sum() / (denom + 1e-12)
 
+    def _qs_in_network_units(self, pts, coord_scale):
+        B = pts.shape[0]
+        qs = max(float(self.qs), 1e-8)
+        if coord_scale is None:
+            return pts.new_full((B, 1, 1), qs)
+        if torch.is_tensor(coord_scale):
+            scale = coord_scale.to(device=pts.device, dtype=pts.dtype).reshape(-1)
+            if scale.numel() == 1:
+                scale = scale.expand(B)
+            else:
+                scale = scale[:B]
+            scale = scale.view(B, 1, 1).clamp_min(1e-8)
+            return pts.new_tensor(qs) / scale
+        return pts.new_full((B, 1, 1), qs / max(float(coord_scale), 1e-8))
+
+    def _compute_L_octree_snap(self, pts, new_pts, add_w, coord_scale=None):
+        if self.add_oct <= 0.0 or new_pts.shape[-1] == 0:
+            return new_pts.new_tensor(0.0)
+        if add_w.dim() == 3:
+            add_w = add_w.squeeze(1)
+
+        qs_norm = self._qs_in_network_units(pts, coord_scale).clamp_min(1e-8)
+        cloud_min = pts.detach().amin(dim=2, keepdim=True)
+        q = (new_pts - cloud_min) / qs_norm
+        q_target = torch.round(q).detach()
+        grid_delta = (q - q_target) * qs_norm
+        val = torch.norm(grid_delta, dim=1).pow(2) / qs_norm.squeeze(2).squeeze(1).pow(2).clamp_min(1e-12).unsqueeze(1)
+        return (add_w * val).sum() / (add_w.sum() + 1e-12)
+
     def evaluate_mask_similarity(self, hard_mask, soft_mask, add_prob, k=None):
         B, N = hard_mask.shape
         if k is None:
@@ -237,7 +275,7 @@ class AddModule(nn.Module):
 
         return results
 
-    def forward(self, pts, Fl, D, S, O):
+    def forward(self, pts, Fl, D, S, O, coord_scale=None):
         if self.args.trainORtest == "train":
             """==================== SetUp ===================="""
             B, _, N = pts.shape
@@ -271,6 +309,7 @@ class AddModule(nn.Module):
             hard_mask = torch.zeros_like(add_prob) # (B,N) # 0で初期化したHardMask
             hard_mask.scatter_(1, add_idx, 1.0) # (B,N) # 上位K個に対してのみ存在確率を1に設定
             hard_ratio = hard_mask.mean(dim=1) # 実際のHard選択での追加率の計算
+            self.last_policy_log_prob = self._bernoulli_mask_log_prob(add_logit, hard_mask)
 
             idx_expand = add_idx.unsqueeze(1).expand(-1, 3, -1) # (B,3,K) # add_idxを(B,K)から(B,3,K)に拡張
             new_pts_hard = torch.gather(new_pts_all, 2, idx_expand) # (B,3,K) # new_pts_allの中からadd_idxの分だけ取り出す
@@ -279,25 +318,10 @@ class AddModule(nn.Module):
             """==================== Soft ====================""" 
             tau_match = max(self.tau_match, 1e-6)
             target_ratio = hard_ratio.unsqueeze(1)  # (B,1)
-
-            # 初期閾値は logit の平均でよい
-            thr_soft = add_logit.mean(dim=1, keepdim=True)  # (B,1)
-
-            # logit空間で、soft_mask の平均が target_ratio に一致する閾値を解く
-            for _ in range(8):
-                soft_tmp = torch.sigmoid((add_logit - thr_soft) / tau_match) # (B,N)
-                mean_tmp = soft_tmp.mean(dim=1, keepdim=True) # (B,1)
-
-                dmean_dthr = -(soft_tmp * (1.0 - soft_tmp) / tau_match).mean(dim=1, keepdim=True)
-                dmean_dthr = torch.where(
-                    dmean_dthr.abs() < 1e-8,
-                    torch.full_like(dmean_dthr, -1e-8),
-                    dmean_dthr
-                )
-
-                thr_soft = thr_soft - (mean_tmp - target_ratio) / dmean_dthr
-
-            soft_mask = torch.sigmoid((add_logit - thr_soft) / tau_match)
+            thr_soft = torch.gather(add_logit, 1, add_idx[:, -1:].detach()) # (B,1)
+            soft_mask_raw = torch.sigmoid((add_logit - thr_soft) / tau_match) # (B,N)
+            soft_mean_det = soft_mask_raw.mean(dim=1, keepdim=True).detach()
+            soft_mask = (soft_mask_raw * (target_ratio / (soft_mean_det + 1e-12))).clamp(0.0, 1.0)
             # soft_mask.retain_grad() 
             
             """==================== STE mask ===================="""
@@ -310,20 +334,30 @@ class AddModule(nn.Module):
             add_w_hard = torch.gather(add_w, 2, add_idx.unsqueeze(1)) # (B,1,K) # Hardで選ばれた点の重みを取り出す
             L_fit = self._compute_L_fit(pts, new_pts_hard, add_w_hard)
             L_rep = self._compute_L_rep(new_pts_hard, add_w_hard)
+            L_oct = self._compute_L_octree_snap(pts, new_pts_hard, add_w_hard, coord_scale)
 
             mean_add_ratio_soft = soft_mask.mean(dim=1) # (B,) # スケール後SoftMaskの平均追加率
             target_ratio = torch.full_like(hard_ratio, float(self.target_add_ratio)) # (B,) # 目標追加率
 
-            L_cnt = 0.0
-            # delta_cnt = (mean_add_ratio_soft - target_ratio).abs() # 目標追加率と実際の追加率のずれ
-            # L_cnt = torch.log1p(128 * delta_cnt).mean() # 追加率のずれに対する損失（小さなずれは緩やか、大きなずれは急激にペナルティ）
+            delta_cnt = (mean_add_ratio_soft - target_ratio).abs() # 目標追加率と実際の追加率のずれ
+            L_cnt = torch.log1p(128 * delta_cnt).mean() # 追加率のずれに対する損失（小さなずれは緩やか、大きなずれは急激にペナルティ）
 
-            loss_add = (self.add_cnt * L_cnt + self.add_fit * L_fit + self.add_rep * L_rep) # 実際の追加損失の計算
+            loss_add = (
+                self.add_cnt * L_cnt
+                + self.add_fit * L_fit
+                + self.add_rep * L_rep
+                + self.add_oct * L_oct
+            ) # 実際の追加損失の計算
 
-            if self.writer is not None and hasattr(self.writer, "write"):
+            if (
+                getattr(self.args, "verbose_step_logs", False)
+                and getattr(self.args, "_log_this_step", True)
+                and self.writer is not None
+                and hasattr(self.writer, "write")
+            ):
                 self.writer.write(
                     f"L_add   :{loss_add:.4f}->"
-                    f"L_cnt:{L_cnt:.4f}, L_fit:{L_fit:.4f}, L_rep:{L_rep:.4f}, "
+                    f"L_cnt:{L_cnt:.4f}, L_fit:{L_fit:.4f}, L_rep:{L_rep:.4f}, L_oct:{L_oct:.4f}, "
                     f"AddRatio(soft):{mean_add_ratio_soft.mean().item():.6f}, "
                     f"AddRatio(hard):{hard_ratio.mean().item():.6f}"
                 )

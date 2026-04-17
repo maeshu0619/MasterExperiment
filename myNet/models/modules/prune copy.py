@@ -10,7 +10,7 @@ ROOT_DIR = os.path.abspath(
 )
 sys.path.append(ROOT_DIR)
 
-from utils.utils_unoutdet import *
+from utils.segmentation.utils_unoutdet import *
 
 
 class PruningModule(nn.Module):

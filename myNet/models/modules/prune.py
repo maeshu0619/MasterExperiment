@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from .resblock import ResnetBlockConv1d
 
 import os
@@ -10,7 +11,7 @@ ROOT_DIR = os.path.abspath(
 )
 sys.path.append(ROOT_DIR)
 
-from utils.utils_unoutdet import *
+from utils.segmentation.utils_unoutdet import *
 
 
 class PruningModule(nn.Module):
@@ -39,6 +40,7 @@ class PruningModule(nn.Module):
 
         self.prun_cnt = args.prun_cnt
         self.prun_out = args.prun_out
+        self.use_label_count = bool(getattr(args, "prune_use_label_count", True))
 
         self.conv_in = nn.Conv1d(in_dim, hidden, 1)
         self.blocks = nn.ModuleList(
@@ -51,6 +53,52 @@ class PruningModule(nn.Module):
         self.bn_out_ratio = nn.BatchNorm1d(hidden) # 残す割合スコアの出力層部分
         self.act_out_ratio = nn.ReLU()
         self.conv_out_ratio = nn.Conv1d(hidden, 1, 1)
+        self.last_policy_log_prob = None
+
+    @staticmethod
+    def _bernoulli_mask_log_prob(logit, hard_mask):
+        log_p_keep = torch.nn.functional.logsigmoid(logit)
+        log_p_drop = torch.nn.functional.logsigmoid(-logit)
+        return (hard_mask.detach() * log_p_keep + (1.0 - hard_mask.detach()) * log_p_drop).mean()
+
+    @staticmethod
+    def _balanced_binary_weights(target_pos):
+        B, N = target_pos.shape
+        total = target_pos.new_full((B, 1), float(N))
+        pos = target_pos.sum(dim=1, keepdim=True)
+        neg = total - pos
+
+        has_pos = pos > 0
+        has_neg = neg > 0
+        both = has_pos & has_neg
+
+        pos_w = torch.where(
+            has_pos,
+            torch.where(both, 0.5 * total / pos.clamp_min(1.0), total / pos.clamp_min(1.0)),
+            torch.zeros_like(pos),
+        )
+        neg_w = torch.where(
+            has_neg,
+            torch.where(both, 0.5 * total / neg.clamp_min(1.0), total / neg.clamp_min(1.0)),
+            torch.zeros_like(neg),
+        )
+
+        weights = target_pos * pos_w + (1.0 - target_pos) * neg_w
+        return weights / weights.mean(dim=1, keepdim=True).clamp_min(1e-12)
+
+    def _outlier_label_loss(self, prun_logit, target_out):
+        # prun_logit は「残す」logitなので、外れ点検出では符号を反転して
+        # 1=outlier を直接 foreground として扱う。
+        drop_logit = -prun_logit
+        weights = self._balanced_binary_weights(target_out)
+        L_out_bce = F.binary_cross_entropy_with_logits(
+            drop_logit,
+            target_out,
+            weight=weights,
+            reduction="sum",
+        ) / weights.sum().clamp_min(1e-12)
+        L_out_lovasz = lovasz_hinge(drop_logit, target_out)
+        return L_out_bce + L_out_lovasz
 
     def _solve_soft_threshold(self, keep_prob, keep_ratio_pred):
         tau_match = max(self.tau_match, 1e-6)
@@ -171,6 +219,13 @@ class PruningModule(nn.Module):
         if self.args.trainORtest == "train":
             """==================== SetUp ===================="""
             B, _, N = pts.shape # バッチサイズ、チャネル数、点数
+            target_out = OutLabel.squeeze(1).to(dtype=pts.dtype).detach() # [B,N], 1=outlier(消す)
+            target_keep = 1.0 - target_out # [B,N], 1=inlier(残す)
+            target_keep_ratio_raw = target_keep.mean(dim=1) # [B]
+            target_keep_ratio = target_keep_ratio_raw.clamp(
+                min=self.ratio_min,
+                max=self.ratio_max,
+            )
             x = torch.cat([Ff, Den, Str, Oct, Out], dim=1) # 入力をチャネル方向に統合
             h = self.conv_in(x) # 入力層で隠れ表現に変換
             for block in self.blocks: # ResBlockに通す
@@ -186,21 +241,32 @@ class PruningModule(nn.Module):
             ratio_raw = torch.sigmoid(ratio_logit) # (B,) # 割合スコアを0~1に変換する
             keep_ratio_pred = self.ratio_min + (self.ratio_max - self.ratio_min) * ratio_raw # (B,) # 予測割合を最小、最大値のレンジに収める
 
-            K_keep_each = torch.round(keep_ratio_pred.detach() * N).long() # (B,) # 何点残すのかを整数変換
+            ratio_for_hard = target_keep_ratio if self.use_label_count else keep_ratio_pred.detach()
+            K_keep_each = torch.round(ratio_for_hard.detach() * N).long() # (B,) # 何点残すのかを整数変換
             K_keep_each = torch.clamp(K_keep_each, min=1, max=N) # 残す点数を1～N範囲に制限
 
-            # ==================== Soft ====================
-            tau_match = max(self.tau_match, 1e-6)
-            thr_soft = self._solve_soft_threshold(keep_prob, keep_ratio_pred)
-            soft_mask = torch.sigmoid((keep_prob - thr_soft) / tau_match) # 最終的なthr_softを用いて、Soft Maskをつくる
-            
-            """==================== Hard ===================="""        
+            """==================== Hard ===================="""
             pts_prun_hard, keep_idx_hard, hard_mask, valid_topk_mask = self._build_hard_selection(
                 pts,
                 keep_prob,
                 K_keep_each,
             )
             hard_ratio = hard_mask.mean(dim=1) # [B] # 全点のうち何割残ったかを計算
+            self.last_policy_log_prob = self._bernoulli_mask_log_prob(prun_logit, hard_mask)
+
+            # ==================== Soft ====================
+            # Hard出力はtop-kのまま、backwardではkeep_probとkeep_ratio_predの両方へ
+            # 圧縮lossが戻るようにする。従来のno_grad threshold解法ではratio headが
+            # 内部Pruning lossに強く支配され、圧縮効率の悪化を戻しにくかった。
+            tau_match = max(self.tau_match, 1e-6)
+            kth_pos = (K_keep_each - 1).clamp(min=0).unsqueeze(1)
+            kth_idx = torch.gather(keep_idx_hard, 1, kth_pos)
+            thr_soft = torch.gather(keep_prob, 1, kth_idx.detach())
+            soft_mask_raw = torch.sigmoid((keep_prob - thr_soft) / tau_match)
+            soft_mean_det = soft_mask_raw.mean(dim=1, keepdim=True).detach()
+            soft_mask = (
+                soft_mask_raw * (keep_ratio_pred.unsqueeze(1) / (soft_mean_det + 1e-12))
+            ).clamp(0.0, 1.0)
 
             """==================== STE ===================="""
             mask_st = hard_mask - soft_mask.detach() + soft_mask # (B,N) # forwardとbackwardで分け、勾配が流れるようにする
@@ -209,19 +275,30 @@ class PruningModule(nn.Module):
             keep_w_hard = keep_w_hard * valid_topk_mask.unsqueeze(1).to(keep_w.dtype) # (B,1,K_keep) # 無効位置の重みを0にする
 
             """==================== Calculate Loss ===================="""
-            target_keep = 1.0 - OutLabel.squeeze(1) # [B,N], 1=inlier(残す), 0=outlier(消す)
-            target_keep = target_keep.detach() # 教師ラベルなので勾配が流れないようにする
-            L_out_bce = torch.nn.functional.binary_cross_entropy_with_logits(prun_logit, target_keep) # prun_logitと教師target_keepとのBCE損失の計算
-            L_out_lovasz = lovasz_hinge(prun_logit, target_keep) # Lovasz hinge損失の計算
-            L_out = L_out_bce + L_out_lovasz # L_outの計算
-            loss_prun = L_out # 削除損失計算
+            L_out = self._outlier_label_loss(prun_logit, target_out) # 外れ点をforegroundとして見る損失
+            L_ratio = F.l1_loss(
+                keep_ratio_pred,
+                target_keep_ratio,
+            )
+            loss_prun = L_out + self.prun_cnt * L_ratio # 削除損失計算
 
-            if getattr(self.args, "verbose_step_logs", False) and self.writer is not None and hasattr(self.writer, "write"): # ログ
+            out_count = target_out.sum(dim=1).clamp_min(1.0)
+            kept_out_ratio = (hard_mask * target_out).sum(dim=1) / out_count
+            dropped_out_ratio = 1.0 - kept_out_ratio
+
+            if (
+                getattr(self.args, "verbose_step_logs", False)
+                and getattr(self.args, "_log_this_step", True)
+                and self.writer is not None
+                and hasattr(self.writer, "write")
+            ): # ログ
                 self.writer.write(
                     f"L_prun  :{loss_prun:.4f}->"
-                    f"L_out:{L_out:.4f}, "
+                    f"L_out:{L_out:.4f}, L_ratio:{L_ratio:.4f}, "
+                    f"LabelKeep:{target_keep_ratio_raw.mean().item():.6f}, "
                     f"PrunRatio(soft):{soft_mask.mean(dim=1).mean().item():.6f}, "
-                    f"PrunRatio(hard):{hard_ratio.mean().item():.6f}"
+                    f"PrunRatio(hard):{hard_ratio.mean().item():.6f}, "
+                    f"OutDrop(hard):{dropped_out_ratio.mean().item():.6f}"
                 )
 
             # ===== デバッグ用に内部テンソルを保持 =====
@@ -233,6 +310,7 @@ class PruningModule(nn.Module):
                     "hard_mask": hard_mask,
                     "soft_mask": soft_mask,
                     "keep_w_full": keep_w,
+                    "target_out": target_out,
                 }
 
                 for name, tensor in self.debug_tensors.items():
@@ -241,10 +319,17 @@ class PruningModule(nn.Module):
             else:
                 self.debug_tensors = {}
 
-            return pts_prun_hard, keep_w, keep_idx_hard, loss_prun, L_out
+            return pts_prun_hard, keep_w, keep_idx_hard, valid_topk_mask, loss_prun, L_out
         else:
             """==================== SetUp ===================="""
             B, _, N = pts.shape # バッチサイズ、チャネル数、点数
+            target_keep_ratio = None
+            if OutLabel is not None and self.use_label_count:
+                target_out = OutLabel.squeeze(1).to(dtype=pts.dtype).detach()
+                target_keep_ratio = (1.0 - target_out).mean(dim=1).clamp(
+                    min=self.ratio_min,
+                    max=self.ratio_max,
+                )
             x = torch.cat([Ff, Den, Str, Oct, Out], dim=1) # 入力をチャネル方向に統合
             h = self.conv_in(x) # 入力層で隠れ表現に変換
             for block in self.blocks: # ResBlockに通す
@@ -258,13 +343,14 @@ class PruningModule(nn.Module):
             ratio_raw = torch.sigmoid(ratio_logit) # (B,)
             keep_ratio_pred = self.ratio_min + (self.ratio_max - self.ratio_min) * ratio_raw # (B,)
 
-            """==================== Hard ===================="""        
-            K_keep_each = torch.round(keep_ratio_pred.detach() * N).long() # (B,)
+            """==================== Hard ===================="""
+            ratio_for_hard = target_keep_ratio if target_keep_ratio is not None else keep_ratio_pred.detach()
+            K_keep_each = torch.round(ratio_for_hard.detach() * N).long() # (B,)
             K_keep_each = torch.clamp(K_keep_each, min=1, max=N)
-            pts_prun_hard, keep_idx_hard, _, _ = self._build_hard_selection(
+            pts_prun_hard, keep_idx_hard, _, valid_topk_mask = self._build_hard_selection(
                 pts,
                 keep_prob,
                 K_keep_each,
             )
 
-            return pts_prun_hard, keep_idx_hard
+            return pts_prun_hard, keep_idx_hard, valid_topk_mask
